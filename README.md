@@ -2,6 +2,8 @@
 
 Cursor models inside signed **Codex Desktop** (`ChatGPT.app`). Official GPT chats stay official. Cursor chats stream into Desktop’s native **Thought**, **Read**, and **Ran** cards.
 
+<img width="336" height="460" alt="image" src="https://github.com/user-attachments/assets/34e4b2ac-de02-483f-8bf3-614ad94a9f84" />
+
 These patches overlay **[cursor-api-proxy](https://github.com/anyrobert/cursor-api-proxy)** (`npm`). They do **not** patch ChatGPT.app.
 
 | This release | Codex Desktop | cursor-api-proxy |
