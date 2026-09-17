@@ -2,6 +2,8 @@ import { createResponsesNativeStream, emitCompactContinue, emitCompactReplay, em
 import { assertResponsesTerminal, parseSse } from "../patches/sse-contract.js";
 import { extractFinalText, extractThinkingText, extractTurnHistory, beginLiveTurn, bufferEvent, completeLiveTurn, peekLiveTurn, getLiveTurn, promptHash, rewriteResponseId } from "../patches/thread-replay.js";
 import { isDesktopExecFollowUp } from "../patches/tool-types.js";
+import { extractCodexThreadId } from "../patches/cursor-turn.js";
+import { rememberCall, rememberResponse, resetStoreForTest, threadKeyFromFollowUp } from "../patches/thread-session.js";
 
 function mockRes() {
     let buf = "";
@@ -483,3 +485,49 @@ function collectWrite(res) {
         throw new Error("no outputs is not a follow-up");
     console.log("ok Desktop exec follow-up detection");
 }
+
+{
+    const nativeRes = mockRes();
+    const native = createResponsesNativeStream({
+        res: nativeRes,
+        writeEvent: collectWrite(nativeRes),
+        responseId: "resp_nodelta",
+        body: {},
+        displayModel: "m",
+        createdAt: 1,
+        promptTokens: 1,
+    });
+    native.onTool({ name: "Shell", args: { command: "pwd" }, callId: "c-nodelta" });
+    const events = parseSse(nativeRes.dump());
+    if (events.some((e) => String(e.event || "").includes("function_call_arguments")))
+        throw new Error("exec_command must not emit function_call_arguments.delta");
+    console.log("ok no function_call_arguments events");
+}
+
+{
+    process.env.CURSOR_BRIDGE_THREAD_SESSIONS = `/tmp/cdc-sessions-${process.pid}.json`;
+    resetStoreForTest();
+    rememberResponse("thread:01a0719d-424f-7801-8acf-be9add1e0114", "resp_prev1");
+    rememberCall("thread:019fc3aa-bd72-7ea1-b807-4b9c18ec48bf", "call_abc");
+    if (threadKeyFromFollowUp({ previous_response_id: "resp_prev1" }, []) !== "thread:01a0719d-424f-7801-8acf-be9add1e0114")
+        throw new Error("follow-up must resolve thread from previous_response_id");
+    if (threadKeyFromFollowUp({}, [{ callId: "call_abc", output: "ok" }]) !== "thread:019fc3aa-bd72-7ea1-b807-4b9c18ec48bf")
+        throw new Error("follow-up must resolve thread from call_id");
+    const fromInput = extractCodexThreadId({}, {
+        input: [{
+            type: "message",
+            role: "user",
+            content: [{ type: "input_text", text: "see codex://threads/01a0719d-424f-7801-8acf-be9add1e0114" }],
+        }],
+    }, "");
+    if (fromInput !== "01a0719d-424f-7801-8acf-be9add1e0114")
+        throw new Error(`thread id from input, got ${fromInput}`);
+    const rec = beginLiveTurn("thread:01a0719d-424f-7801-8acf-be9add1e0114", "hash-old", { responseId: "resp_live" });
+    if (!peekLiveTurn("thread:01a0719d-424f-7801-8acf-be9add1e0114")?.primaryId)
+        throw new Error("live turn must be peekable without matching hash");
+    if (rec.hash === "hash-new")
+        throw new Error("sanity");
+    completeLiveTurn("thread:01a0719d-424f-7801-8acf-be9add1e0114");
+    console.log("ok follow-up thread map and live peek without hash");
+}
+

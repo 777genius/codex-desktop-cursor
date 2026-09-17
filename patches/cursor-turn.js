@@ -46,6 +46,42 @@ function allMatches(regex, text) {
     return out;
 }
 
+function inputBlob(body) {
+    if (!body)
+        return "";
+    const parts = [];
+    if (typeof body.previous_response_id === "string")
+        parts.push(body.previous_response_id);
+    const meta = body.metadata;
+    if (meta && typeof meta === "object") {
+        for (const key of ["thread_id", "threadId", "conversation_id", "conversationId"]) {
+            if (typeof meta[key] === "string")
+                parts.push(meta[key]);
+        }
+    }
+    const walk = (value) => {
+        if (typeof value === "string") {
+            parts.push(value);
+            return;
+        }
+        if (Array.isArray(value)) {
+            for (const item of value)
+                walk(item);
+            return;
+        }
+        if (value && typeof value === "object") {
+            if (typeof value.text === "string")
+                parts.push(value.text);
+            if (typeof value.content === "string")
+                parts.push(value.content);
+            if (Array.isArray(value.content))
+                walk(value.content);
+        }
+    };
+    walk(body.input);
+    return parts.join("\n").slice(0, 200000);
+}
+
 export function extractCodexThreadId(headers, body, prompt) {
     const fromHeader = headerValue(headers, "x-codex-thread-id") ||
         headerValue(headers, "x-cursor-thread");
@@ -54,12 +90,14 @@ export function extractCodexThreadId(headers, body, prompt) {
     const meta = body?.metadata;
     const fromMeta = typeof meta?.thread_id === "string"
         ? meta.thread_id
-        : typeof body?.conversation_id === "string"
-            ? body.conversation_id
-            : undefined;
+        : typeof meta?.threadId === "string"
+            ? meta.threadId
+            : typeof body?.conversation_id === "string"
+                ? body.conversation_id
+                : undefined;
     if (looksLikeUuid(fromMeta))
         return fromMeta.trim();
-    const text = typeof prompt === "string" ? prompt : "";
+    const text = [typeof prompt === "string" ? prompt : "", inputBlob(body)].filter(Boolean).join("\n");
     const tagged = THREAD_TAG_RE.exec(text);
     if (looksLikeUuid(tagged?.[1]))
         return tagged[1];

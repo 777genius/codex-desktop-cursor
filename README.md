@@ -6,9 +6,9 @@ These patches overlay **[cursor-api-proxy](https://github.com/anyrobert/cursor-a
 
 | This release | Codex Desktop | cursor-api-proxy |
 | --- | --- | --- |
-| `0.1.0` | `26.908.70816` (build `9275`) | `1.4.0` |
+| `26.908.70816` | `26.908.70816` (build `9275`) | `1.4.0` |
 
-Releases are cut against Desktop’s own version (`CFBundleShortVersionString`). If Desktop updates, wait for a matching GitHub release before overlaying.
+The Git tag **is** Desktop’s `CFBundleShortVersionString`. A second overlay for the same Desktop build is `26.908.70816-2`. If Desktop updates, wait for a matching tag before overlaying.
 
 ## Quick start
 
@@ -71,11 +71,7 @@ In Desktop, pick a `*-cursor` model (Mixin catalog) or the `cursor_proxy` provid
 
 ## Versioning
 
-Git tags are overlay versions (`v0.1.0`). GitHub release titles always include the Desktop version they were tested on:
-
-```
-v0.1.0 — Codex Desktop 26.908.70816
-```
+Git tags match Codex Desktop (`26.908.70816`). Overlay-only fixes on that same Desktop build append `-2`, `-3`, …
 
 `package.json` → `codexDesktop.compatible` is the source of truth. `node scripts/desktop-version.mjs` compares it to `/Applications/ChatGPT.app`.
 

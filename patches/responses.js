@@ -14,7 +14,7 @@ import { resolveRequestWorkspaceHeader } from "../codex-desktop.js";
 import { extractCodexThreadId, prepareAgentInvocation, sessionIdFromStdout } from "../cursor-turn.js";
 import { createResponsesNativeStream, emitCompactContinue, emitCompactReplay, emitInFlightSnapshot } from "../responses-native.js";
 import { acquireThreadLock } from "../thread-lock.js";
-import { getThreadSession, markThreadOutput, markThreadPrompt } from "../thread-session.js";
+import { getThreadSession, markThreadOutput, markThreadPrompt, rememberCall, rememberResponse, threadKeyFromFollowUp } from "../thread-session.js";
 import { addLiveSink, beginLiveTurn, bufferEvent, completeLiveTurn, extractFinalText, extractThinkingText, extractTurnHistory, getLiveRecord, getLiveTurn, isDuplicateLastUser, peekLiveTurn, promptHash, rewriteResponseId, waitLiveTurn, } from "../thread-replay.js";
 import { sanitizeMessages } from "../sanitize.js";
 import { resolveWorkspace } from "../workspace.js";
@@ -194,26 +194,7 @@ async function writeStructuredResponseTurn(opts) {
             writeResponseEvent(opts.res, "response.output_item.added", {
                 response_id: opts.id,
                 output_index: outputIndex,
-                item: {
-                    id: call.itemId,
-                    type: "function_call",
-                    status: "in_progress",
-                    call_id: call.callId,
-                    name: call.name,
-                    arguments: "",
-                },
-            });
-            writeResponseEvent(opts.res, "response.function_call_arguments.delta", {
-                response_id: opts.id,
-                item_id: call.itemId,
-                output_index: outputIndex,
-                delta: call.arguments,
-            });
-            writeResponseEvent(opts.res, "response.function_call_arguments.done", {
-                response_id: opts.id,
-                item_id: call.itemId,
-                output_index: outputIndex,
-                arguments: call.arguments,
+                item: functionCallItem(call),
             });
             writeResponseEvent(opts.res, "response.output_item.done", {
                 response_id: opts.id,
@@ -522,10 +503,12 @@ export async function handleResponses(req, res, ctx, rawBody, method, pathname, 
     const id = `resp_${randomUUID().replace(/-/g, "")}`;
     const createdAt = Math.floor(Date.now() / 1000);
     const followThreadId = extractCodexThreadId(req.headers, body, "");
-    const followThreadKey = followThreadId ? `thread:${followThreadId}` : undefined;
+    const followThreadKey = followThreadId
+        ? `thread:${followThreadId}`
+        : threadKeyFromFollowUp(body, submittedToolOutputs);
     if (!config.useAcp && isDesktopExecFollowUp(body, submittedToolOutputs)) {
         const live = followThreadKey ? peekLiveTurn(followThreadKey) : undefined;
-        console.log(`[exec-followup] outputs=${submittedToolOutputs.length} thread=${followThreadKey || "-"} live=${!!live}`);
+        console.log(`[exec-followup] outputs=${submittedToolOutputs.length} thread=${followThreadKey || "-"} live=${!!live} prev=${body.previous_response_id || "-"}`);
         if (body.stream && live) {
             await reattachLiveStream({
                 res,
@@ -717,12 +700,15 @@ export async function handleResponses(req, res, ctx, rawBody, method, pathname, 
     const preview = prepareAgentInvocation(invocation, { silent: true });
     const previewHash = promptHash(preview.agentPrompt);
     if (body.stream) {
-        const inflight = peekLiveTurn(preview.threadKey);
-        if (inflight && inflight.hash === previewHash && inflight.primaryId) {
+        const liveKey = preview.threadKey || threadKeyFromFollowUp(body, submittedToolOutputs);
+        const inflight = peekLiveTurn(liveKey);
+        if (inflight && inflight.primaryId) {
+            if (inflight.hash !== previewHash)
+                console.log(`[reattach] ${liveKey} hash mismatch; attaching live turn`);
             await reattachLiveStream({
                 res,
                 responseId: id,
-                threadKey: preview.threadKey,
+                threadKey: liveKey,
                 body,
                 displayModel,
                 createdAt,
@@ -916,12 +902,16 @@ export async function handleResponses(req, res, ctx, rawBody, method, pathname, 
         });
         const promptTokens = Math.max(1, Math.round(agentPrompt.length / 4));
         beginLiveTurn(turn.threadKey, turnHash, { res, responseId: id });
+        rememberResponse(turn.threadKey, id);
         markThreadPrompt(turn.threadKey, turn.agentPrompt);
         let lastEventAt = Date.now();
         const writeTracked = (type, data) => {
             lastEventAt = Date.now();
             if (type !== "response.in_progress")
                 bufferEvent(turn.threadKey, type, data);
+            const callId = data?.item?.call_id || data?.item?.callId;
+            if (callId)
+                rememberCall(turn.threadKey, callId);
             writeToLiveSinks(turn.threadKey, res, id, type, data);
         };
         const stopKeepalive = startSseKeepalive(() => getLiveRecord(turn.threadKey)?.sinks || [{ res, id }], () => writeTracked("response.in_progress", {
