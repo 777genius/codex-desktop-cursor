@@ -3,7 +3,7 @@ import { assertResponsesTerminal, parseSse } from "../patches/sse-contract.js";
 import { extractFinalText, extractThinkingText, extractTurnHistory, beginLiveTurn, bufferEvent, completeLiveTurn, peekLiveTurn, getLiveTurn, promptHash, rewriteResponseId } from "../patches/thread-replay.js";
 import { isDesktopExecFollowUp } from "../patches/tool-types.js";
 import { extractCodexThreadId } from "../patches/cursor-turn.js";
-import { rememberCall, rememberResponse, resetStoreForTest, threadKeyFromFollowUp } from "../patches/thread-session.js";
+import { rememberCall, rememberResponse, resetStoreForTest, threadKeyFromFollowUp, putThreadSession, getThreadSession, markThreadPrompt } from "../patches/thread-session.js";
 
 function mockRes() {
     let buf = "";
@@ -555,4 +555,26 @@ function collectWrite(res) {
     completeLiveTurn("thread:01a0719d-424f-7801-8acf-be9add1e0114");
     console.log("ok follow-up thread map and live peek without hash");
 }
+
+{
+    process.env.CURSOR_BRIDGE_THREAD_SESSIONS = `/tmp/cdc-sessions-stale-${process.pid}.json`;
+    resetStoreForTest();
+    putThreadSession("thread:019fc3aa-bd72-7ea1-b807-4b9c18ec48bf", {
+        chatId: "ef3284a8-c62a-40e0-b7d0-5f4bbde3c1db",
+        model: "gemini-3.8-flash-high",
+        mode: "agent",
+        workspace: "/tmp",
+        ready: true,
+        lastPromptHash: "old-hash",
+        lastOutputText: "### 1. По поводу дней до 12 сентября — мы их уже сделали?",
+    });
+    markThreadPrompt("thread:019fc3aa-bd72-7ea1-b807-4b9c18ec48bf", "дальше");
+    const rec = getThreadSession("thread:019fc3aa-bd72-7ea1-b807-4b9c18ec48bf");
+    if (rec.lastOutputText)
+        throw new Error("дальше must not compact-replay the previous assistant essay");
+    if (!rec.lastPromptHash || rec.lastPromptHash === "old-hash")
+        throw new Error("new prompt must update lastPromptHash");
+    console.log("ok stale lastOutputText dropped on new prompt");
+}
+
 

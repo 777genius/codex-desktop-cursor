@@ -14,8 +14,8 @@ import { resolveRequestWorkspaceHeader } from "../codex-desktop.js";
 import { extractCodexThreadId, prepareAgentInvocation, sessionIdFromStdout } from "../cursor-turn.js";
 import { createResponsesNativeStream, emitCompactContinue, emitCompactReplay, emitInFlightSnapshot } from "../responses-native.js";
 import { acquireThreadLock } from "../thread-lock.js";
-import { getThreadSession, markThreadOutput, markThreadPrompt, rememberCall, rememberResponse, threadKeyFromFollowUp } from "../thread-session.js";
-import { addLiveSink, beginLiveTurn, bufferEvent, completeLiveTurn, extractFinalText, extractThinkingText, getLiveRecord, getLiveTurn, isDuplicateLastUser, peekLiveTurn, promptHash, rewriteResponseId, waitLiveTurn, } from "../thread-replay.js";
+import { markThreadOutput, markThreadPrompt, rememberCall, rememberResponse, threadKeyFromFollowUp } from "../thread-session.js";
+import { addLiveSink, beginLiveTurn, bufferEvent, completeLiveTurn, extractFinalText, extractThinkingText, getLiveRecord, getLiveTurn, peekLiveTurn, promptHash, rewriteResponseId, waitLiveTurn, } from "../thread-replay.js";
 import { sanitizeMessages } from "../sanitize.js";
 import { resolveWorkspace } from "../workspace.js";
 import { fitPromptToWinCmdline, warnPromptTruncated, } from "../win-cmdline-limit.js";
@@ -741,13 +741,11 @@ export async function handleResponses(req, res, ctx, rawBody, method, pathname, 
     const agentPrompt = turn.resumed ? turn.agentPrompt : seededPrompt;
     const turnHash = promptHash(turn.agentPrompt);
     const cachedTurn = getLiveTurn(turn.threadKey, turnHash);
-    const session = getThreadSession(turn.threadKey);
-    const sessionDup = turn.resumed && isDuplicateLastUser(session, turnHash);
-    const replayText = extractFinalText(cachedTurn) || session?.lastOutputText || "";
-    // Empty compact replay is how 019fc3aa showed a blank completed turn after
-    // Desktop retried «дальше». Only replay when we have assistant text.
-    if (body.stream && replayText && (cachedTurn || sessionDup)) {
-        console.log(`[replay] ${turn.threadKey} chat=${turn.resumeChatId || "-"} compact=${replayText.length}`);
+    // Replay only the answer produced for THIS prompt. lastOutputText from an
+    // earlier turn is how «дальше» on 019fc3aa re-printed the ranking essay.
+    const finishedText = cachedTurn?.done ? (extractFinalText(cachedTurn) || "") : "";
+    if (body.stream && finishedText) {
+        console.log(`[replay] ${turn.threadKey} chat=${turn.resumeChatId || "-"} compact=${finishedText.length}`);
         writeSseHeaders(res);
         if (typeof res.flushHeaders === "function")
             res.flushHeaders();
@@ -758,7 +756,7 @@ export async function handleResponses(req, res, ctx, rawBody, method, pathname, 
             body,
             displayModel,
             createdAt,
-            text: replayText,
+            text: finishedText,
         });
         if (!res.writableEnded)
             res.end();

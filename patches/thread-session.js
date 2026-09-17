@@ -147,7 +147,9 @@ export function putThreadSession(threadKey, rec) {
         ready,
         lastPromptHash: rec.lastPromptHash ?? (sameChat ? prev?.lastPromptHash : undefined),
         lastPromptAt: rec.lastPromptAt ?? (sameChat ? prev?.lastPromptAt : undefined),
-        lastOutputText: rec.lastOutputText ?? (sameChat ? prev?.lastOutputText : undefined),
+        lastOutputText: rec.lastOutputText === ""
+            ? undefined
+            : (rec.lastOutputText ?? (sameChat ? prev?.lastOutputText : undefined)),
         lastResponseId: rec.lastResponseId ?? (sameChat ? prev?.lastResponseId : undefined),
         updatedAt: Date.now(),
     };
@@ -168,10 +170,13 @@ export function markThreadPrompt(threadKey, prompt) {
     const rec = getThreadSession(threadKey);
     if (!rec || !prompt)
         return;
+    const lastPromptHash = createHash("sha256").update(prompt).digest("hex").slice(0, 32);
+    const stale = rec.lastPromptHash && rec.lastPromptHash !== lastPromptHash;
     putThreadSession(threadKey, {
         ...rec,
-        lastPromptHash: createHash("sha256").update(prompt).digest("hex").slice(0, 32),
+        lastPromptHash,
         lastPromptAt: Date.now(),
+        lastOutputText: stale ? "" : rec.lastOutputText,
     });
 }
 
