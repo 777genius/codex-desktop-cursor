@@ -243,7 +243,7 @@ function collectWrite(res) {
 {
     const res = mockRes();
     const id = "resp_keepopen";
-    emitInFlightSnapshot({
+    const native = emitInFlightSnapshot({
         res,
         writeEvent: collectWrite(res),
         responseId: id,
@@ -253,15 +253,20 @@ function collectWrite(res) {
         thinking: "My analysis is now focused on evaluating the session's freshness.",
         keepOpen: true,
     });
-    const events = parseSse(res.dump());
-    if (!events.find((e) => e.event === "response.created"))
+    const openEvents = parseSse(res.dump());
+    if (!openEvents.find((e) => e.event === "response.created"))
         throw new Error("keepOpen snapshot missing created");
-    if (!events.find((e) => e.event === "response.reasoning_summary_text.delta"))
+    if (!openEvents.find((e) => e.event === "response.reasoning_summary_text.delta"))
         throw new Error("keepOpen snapshot must stream thinking");
-    if (events.some((e) => e.event === "response.output_item.done" && e.data?.item?.type === "reasoning"))
+    if (openEvents.some((e) => e.event === "response.output_item.done" && e.data?.item?.type === "reasoning"))
         throw new Error("keepOpen snapshot must not close Thought");
-    if (events.some((e) => e.event === "response.completed" || e.event === "response.failed"))
+    if (openEvents.some((e) => e.event === "response.completed" || e.event === "response.failed"))
         throw new Error("keepOpen snapshot must not terminal");
+    native.onText("done after reattach");
+    native.finish();
+    const events = parseSse(res.dump());
+    if (assertResponsesTerminal(events, id) !== "response.completed")
+        throw new Error("keepOpen finish must be a Mixin terminal with [DONE]");
     console.log("ok keepOpen snapshot leaves Thought in progress");
 }
 

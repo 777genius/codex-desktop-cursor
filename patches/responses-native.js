@@ -565,7 +565,7 @@ export function emitCompactReplay(opts) {
  * Desktop reconnect while cursor-agent is still running.
  * Mixin errors on a hanging created-only stream, but response.completed
  * with no assistant text marks the Desktop turn finished (019fc3aa 09:19).
- * Send thinking, keep the HTTP SSE open, complete later via emitCompactContinue.
+ * keepOpen: stream Thought in progress and finish later on this same native.
  */
 export function emitInFlightSnapshot(opts) {
     const { writeEvent, responseId, body, displayModel, createdAt, thinking, history } = opts;
@@ -577,7 +577,7 @@ export function emitInFlightSnapshot(opts) {
         displayModel,
         createdAt,
         promptTokens: 1,
-        fanoutDone: true,
+        fanoutDone: !opts.keepOpen,
     });
     writeEvent("response.created", {
         response: {

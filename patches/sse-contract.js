@@ -1,7 +1,7 @@
 /**
  * Codex Desktop / Mixin custom Responses contract:
  * created (this response id) → optional deltas → exactly one terminal
- * (response.completed or response.failed) with the same id and output: [].
+ * (response.completed or response.failed) with the same id.
  * Then data: [DONE]. Nothing after the terminal.
  */
 

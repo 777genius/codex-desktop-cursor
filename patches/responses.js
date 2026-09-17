@@ -15,7 +15,7 @@ import { extractCodexThreadId, prepareAgentInvocation, sessionIdFromStdout } fro
 import { createResponsesNativeStream, emitCompactContinue, emitCompactReplay, emitInFlightSnapshot } from "../responses-native.js";
 import { acquireThreadLock } from "../thread-lock.js";
 import { markThreadOutput, markThreadPrompt, rememberCall, rememberResponse, threadKeyFromFollowUp } from "../thread-session.js";
-import { addLiveSink, beginLiveTurn, bufferEvent, completeLiveTurn, extractFinalText, extractThinkingText, getLiveRecord, getLiveTurn, peekLiveTurn, promptHash, rewriteResponseId, waitLiveTurn, } from "../thread-replay.js";
+import { addLiveSink, beginLiveTurn, bufferEvent, completeLiveTurn, extractFinalText, extractThinkingText, getLiveRecord, getLiveTurn, peekLiveTurn, promptHash, rewriteResponseId, } from "../thread-replay.js";
 import { sanitizeMessages } from "../sanitize.js";
 import { resolveWorkspace } from "../workspace.js";
 import { fitPromptToWinCmdline, warnPromptTruncated, } from "../win-cmdline-limit.js";
@@ -396,9 +396,15 @@ async function reattachLiveStream({ res, responseId, threadKey, body, displayMod
         res.flushHeaders();
     const thinking = extractThinkingText(rec) || "";
     console.log(`[reattach] ${threadKey} hang events=${rec.events.length} thinking=${thinking.length}`);
+    rememberResponse(threadKey, responseId);
     const native = emitInFlightSnapshot({
         res,
-        writeEvent: (type, data) => writeResponseEvent(res, type, data),
+        writeEvent: (type, data) => {
+            const callId = data?.item?.call_id || data?.item?.callId;
+            if (callId)
+                rememberCall(threadKey, callId);
+            writeResponseEvent(res, type, data);
+        },
         responseId,
         body: body || {},
         displayModel,
@@ -530,7 +536,10 @@ export async function handleResponses(req, res, ctx, rawBody, method, pathname, 
             });
             return;
         }
-        const replayText = extractFinalText(followThreadKey ? getLiveRecord(followThreadKey) : undefined) || " ";
+        // Tool-output follow-up is plumbing, not a new assistant turn.
+        // Replaying a finished turn's text here is how 019fc3aa duplicated
+        // the ranking essay after Desktop POSTed exec_command outputs.
+        const replayText = " ";
         if (body.stream) {
             writeSseHeaders(res);
             emitCompactReplay({

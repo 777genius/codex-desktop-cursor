@@ -4,7 +4,7 @@ Overlay releases are named for **this repo**, but they are **tested against a Co
 
 | Overlay | Desktop | Desktop build | cursor-api-proxy | Notes |
 | --- | --- | --- | --- | --- |
-| 26.908.70816-3 | 26.908.70816 | 9275 | 1.4.0 | Do not compact-replay a previous assistant essay when the user says дальше |
+| 26.908.70816-4 | 26.908.70816 | 9275 | 1.4.0 | Exec follow-up is plumbing; reattach remembers response/call ids and emits [DONE] |
 
 Check locally:
 
