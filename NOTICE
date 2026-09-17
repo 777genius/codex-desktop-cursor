@@ -1,0 +1,7 @@
+This repository overlays MIT-licensed files from cursor-api-proxy
+(https://github.com/anyrobert/cursor-api-proxy) with a Codex Desktop
+Responses contract. Upstream license terms still apply to those files.
+
+It does not modify ChatGPT.app / Codex Desktop. Model-catalog injection
+for official-account coexistence is provided by Codex Mixin
+(https://github.com/Edward-lyz/codex-mixin), which is a separate project.

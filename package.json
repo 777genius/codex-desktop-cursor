@@ -1,0 +1,40 @@
+{
+  "name": "codex-desktop-cursor",
+  "version": "0.1.0",
+  "description": "Cursor models in Codex Desktop (ChatGPT.app): official GPT stays; Cursor streams into native Thought / Read / Ran cards.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "codex-desktop-cursor": "./scripts/cli.mjs"
+  },
+  "scripts": {
+    "test": "node test/sse-contract.test.mjs",
+    "apply": "node scripts/apply.mjs",
+    "desktop-version": "node scripts/desktop-version.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "codexDesktop": {
+    "appId": "com.openai.codex",
+    "compatible": [
+      "26.908.70816"
+    ],
+    "build": "9275"
+  },
+  "peerDependencies": {
+    "cursor-api-proxy": "1.4.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/777genius/codex-desktop-cursor.git"
+  },
+  "keywords": [
+    "codex",
+    "codex-desktop",
+    "chatgpt",
+    "cursor",
+    "cursor-agent",
+    "responses-api"
+  ]
+}

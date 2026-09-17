@@ -1,0 +1,109 @@
+import { createHash } from "node:crypto";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
+const DEFAULT_STORE_PATH = path.join(os.homedir(), ".cursor-api-proxy", "thread-sessions.json");
+let memoryStore;
+
+function storePath() {
+    return process.env.CURSOR_BRIDGE_THREAD_SESSIONS || DEFAULT_STORE_PATH;
+}
+
+function readStore() {
+    if (memoryStore)
+        return memoryStore;
+    try {
+        const raw = fs.readFileSync(storePath(), "utf8");
+        const parsed = JSON.parse(raw);
+        memoryStore = parsed && typeof parsed === "object" ? parsed : {};
+    }
+    catch {
+        memoryStore = {};
+    }
+    return memoryStore;
+}
+
+function writeStore(store) {
+    memoryStore = store;
+    const dest = storePath();
+    const dir = path.dirname(dest);
+    fs.mkdirSync(dir, { recursive: true });
+    const tmp = `${dest}.${process.pid}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify(store, null, 2)}\n`, "utf8");
+    fs.renameSync(tmp, dest);
+}
+
+export function fingerprintsEqual(a, b) {
+    return a?.model === b.model &&
+        a?.mode === b.mode &&
+        a?.workspace === b.workspace;
+}
+
+export function getThreadSession(threadKey) {
+    if (!threadKey)
+        return undefined;
+    const rec = readStore()[threadKey];
+    if (!rec || typeof rec !== "object" || typeof rec.chatId !== "string" || !rec.chatId.trim()) {
+        return undefined;
+    }
+    return rec;
+}
+
+export function putThreadSession(threadKey, rec) {
+    if (!threadKey || !rec?.chatId)
+        return;
+    const store = readStore();
+    const prev = store[threadKey];
+    const sameChat = prev?.chatId === rec.chatId;
+    const ready = rec.ready === true || (sameChat && prev?.ready === true);
+    store[threadKey] = {
+        chatId: rec.chatId,
+        model: rec.model,
+        mode: rec.mode,
+        workspace: rec.workspace,
+        ready,
+        lastPromptHash: rec.lastPromptHash ?? (sameChat ? prev?.lastPromptHash : undefined),
+        lastPromptAt: rec.lastPromptAt ?? (sameChat ? prev?.lastPromptAt : undefined),
+        lastOutputText: rec.lastOutputText ?? (sameChat ? prev?.lastOutputText : undefined),
+        updatedAt: Date.now(),
+    };
+    writeStore(store);
+}
+
+export function markThreadOutput(threadKey, text) {
+    const rec = getThreadSession(threadKey);
+    if (!rec)
+        return;
+    putThreadSession(threadKey, {
+        ...rec,
+        lastOutputText: (typeof text === "string" && text) ? text.slice(0, 32000) : rec.lastOutputText,
+    });
+}
+
+export function markThreadPrompt(threadKey, prompt) {
+    const rec = getThreadSession(threadKey);
+    if (!rec || !prompt)
+        return;
+    putThreadSession(threadKey, {
+        ...rec,
+        lastPromptHash: createHash("sha256").update(prompt).digest("hex").slice(0, 32),
+        lastPromptAt: Date.now(),
+    });
+}
+
+export function deleteThreadSession(threadKey) {
+    if (!threadKey)
+        return;
+    const store = readStore();
+    if (!(threadKey in store))
+        return;
+    delete store[threadKey];
+    writeStore(store);
+}
+
+export function toolsFingerprint(toolsText) {
+    if (!toolsText)
+        return "none";
+    return createHash("sha256").update(toolsText).digest("hex").slice(0, 12);
+}
