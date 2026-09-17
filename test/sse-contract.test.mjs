@@ -241,6 +241,31 @@ function collectWrite(res) {
 }
 
 {
+    const res = mockRes();
+    const id = "resp_keepopen";
+    emitInFlightSnapshot({
+        res,
+        writeEvent: collectWrite(res),
+        responseId: id,
+        body: {},
+        displayModel: "m",
+        createdAt: 1,
+        thinking: "My analysis is now focused on evaluating the session's freshness.",
+        keepOpen: true,
+    });
+    const events = parseSse(res.dump());
+    if (!events.find((e) => e.event === "response.created"))
+        throw new Error("keepOpen snapshot missing created");
+    if (!events.find((e) => e.event === "response.reasoning_summary_text.delta"))
+        throw new Error("keepOpen snapshot must stream thinking");
+    if (events.some((e) => e.event === "response.output_item.done" && e.data?.item?.type === "reasoning"))
+        throw new Error("keepOpen snapshot must not close Thought");
+    if (events.some((e) => e.event === "response.completed" || e.event === "response.failed"))
+        throw new Error("keepOpen snapshot must not terminal");
+    console.log("ok keepOpen snapshot leaves Thought in progress");
+}
+
+{
     beginLiveTurn("thread:think", promptHash("x"));
     bufferEvent("thread:think", "response.reasoning_summary_text.delta", { delta: "abc" });
     bufferEvent("thread:think", "response.output_text.delta", { delta: "xyz" });

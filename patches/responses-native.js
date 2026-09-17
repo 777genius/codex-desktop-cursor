@@ -589,6 +589,11 @@ export function emitInFlightSnapshot(opts) {
             output: [],
         },
     });
+    if (opts.keepOpen) {
+        const raw = String(thinking || "Working…");
+        native.onThinking(raw.length > 2500 ? `…\n${raw.slice(-2500)}` : raw);
+        return native;
+    }
     const steps = Array.isArray(history) ? history : [];
     if (steps.length) {
         for (const step of steps) {

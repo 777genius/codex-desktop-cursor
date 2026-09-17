@@ -76,7 +76,7 @@ export function addLiveSink(threadKey, sink) {
     const rec = live.get(threadKey);
     if (!rec || rec.done || !sink?.res || !sink.id)
         return false;
-    rec.sinks = rec.sinks || [];
+    rec.sinks = (rec.sinks || []).filter((s) => s?.res && !s.res.writableEnded && !s.res.destroyed);
     rec.sinks.push(sink);
     return true;
 }

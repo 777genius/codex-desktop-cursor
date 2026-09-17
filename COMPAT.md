@@ -4,7 +4,7 @@ Overlay releases are named for **this repo**, but they are **tested against a Co
 
 | Overlay | Desktop | Desktop build | cursor-api-proxy | Notes |
 | --- | --- | --- | --- | --- |
-| 26.908.70816 | 26.908.70816 | 9275 | 1.4.0 | Thought (`reasoning`); Read/Ran via `exec_command`; live reattach when Mixin retries |
+| 26.908.70816-2 | 26.908.70816 | 9275 | 1.4.0 | Live Thought/Read/Ran after Mixin retry; reattach keeps the Thought open and forwards new tools |
 
 Check locally:
 

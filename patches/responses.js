@@ -15,7 +15,7 @@ import { extractCodexThreadId, prepareAgentInvocation, sessionIdFromStdout } fro
 import { createResponsesNativeStream, emitCompactContinue, emitCompactReplay, emitInFlightSnapshot } from "../responses-native.js";
 import { acquireThreadLock } from "../thread-lock.js";
 import { getThreadSession, markThreadOutput, markThreadPrompt, rememberCall, rememberResponse, threadKeyFromFollowUp } from "../thread-session.js";
-import { addLiveSink, beginLiveTurn, bufferEvent, completeLiveTurn, extractFinalText, extractThinkingText, extractTurnHistory, getLiveRecord, getLiveTurn, isDuplicateLastUser, peekLiveTurn, promptHash, rewriteResponseId, waitLiveTurn, } from "../thread-replay.js";
+import { addLiveSink, beginLiveTurn, bufferEvent, completeLiveTurn, extractFinalText, extractThinkingText, getLiveRecord, getLiveTurn, isDuplicateLastUser, peekLiveTurn, promptHash, rewriteResponseId, waitLiveTurn, } from "../thread-replay.js";
 import { sanitizeMessages } from "../sanitize.js";
 import { resolveWorkspace } from "../workspace.js";
 import { fitPromptToWinCmdline, warnPromptTruncated, } from "../win-cmdline-limit.js";
@@ -333,7 +333,7 @@ function writeToLiveSinks(threadKey, fallbackRes, fallbackId, type, data) {
     const sinks = rec?.sinks?.length ? rec.sinks : [{ res: fallbackRes, id: fallbackId }];
     const fromId = rec?.primaryId || fallbackId;
     for (const sink of sinks) {
-        if (sink.compact) {
+        if (sink.compact || sink.translated) {
             if (type === "response.in_progress" && sinkOpen(sink)) {
                 writeResponseEvent(sink.res, "response.in_progress", {
                     response: { id: sink.id, object: "response", status: "in_progress" },
@@ -359,12 +359,14 @@ function endLiveSinks(threadKey, fallbackRes) {
     const rec = getLiveRecord(threadKey);
     const sinks = rec?.sinks?.length ? rec.sinks : [{ res: fallbackRes }];
     const text = extractFinalText(rec) || "";
-    const thinking = extractThinkingText(rec) || "";
     for (const sink of sinks) {
         try {
             if (!sinkOpen(sink))
                 continue;
-            if (sink.compact) {
+            if (sink.native && typeof sink.native.finish === "function" && !sink.native.isFinished?.()) {
+                sink.native.finish();
+            }
+            else if (sink.compact) {
                 emitCompactContinue({
                     res: sink.res,
                     writeEvent: (type, data) => writeResponseEvent(sink.res, type, data),
@@ -392,11 +394,9 @@ async function reattachLiveStream({ res, responseId, threadKey, body, displayMod
     writeSseHeaders(res);
     if (typeof res.flushHeaders === "function")
         res.flushHeaders();
-    const text = extractFinalText(rec) || "";
     const thinking = extractThinkingText(rec) || "";
-    const history = extractTurnHistory(rec);
-    console.log(`[reattach] ${threadKey} hang events=${rec.events.length} text=${text.length} thinking=${thinking.length} steps=${history.length}`);
-    emitInFlightSnapshot({
+    console.log(`[reattach] ${threadKey} hang events=${rec.events.length} thinking=${thinking.length}`);
+    const native = emitInFlightSnapshot({
         res,
         writeEvent: (type, data) => writeResponseEvent(res, type, data),
         responseId,
@@ -404,17 +404,27 @@ async function reattachLiveStream({ res, responseId, threadKey, body, displayMod
         displayModel,
         createdAt,
         thinking: thinking || "Working…",
-        history,
+        keepOpen: true,
     });
     addLiveSink(threadKey, {
         res,
         id: responseId,
-        compact: true,
+        translated: true,
+        native,
         body: body || {},
         displayModel,
         createdAt,
     });
     return true;
+}
+
+function liveNatives(threadKey) {
+    const out = [];
+    for (const sink of getLiveRecord(threadKey)?.sinks || []) {
+        if (sink?.native && typeof sink.native.onThinking === "function" && !sink.native.isFinished?.())
+            out.push(sink.native);
+    }
+    return out;
 }
 function responseContentText(message) {
     const content = message?.content;
@@ -520,9 +530,7 @@ export async function handleResponses(req, res, ctx, rawBody, method, pathname, 
             });
             return;
         }
-        const replayText = extractFinalText(followThreadKey ? getLiveRecord(followThreadKey) : undefined)
-            || getThreadSession(followThreadKey)?.lastOutputText
-            || " ";
+        const replayText = extractFinalText(followThreadKey ? getLiveRecord(followThreadKey) : undefined) || " ";
         if (body.stream) {
             writeSseHeaders(res);
             emitCompactReplay({
@@ -1007,6 +1015,8 @@ export async function handleResponses(req, res, ctx, rawBody, method, pathname, 
         let capturedSessionId;
         const parseLine = createStreamParser((text) => {
             accumulated = native.onText(text);
+            for (const extra of liveNatives(turn.threadKey))
+                extra.onText(text);
         }, () => {
             /* finish on process exit only — Mixin rejects streams that close
                without response.completed for THIS response id, and also rejects
@@ -1015,10 +1025,16 @@ export async function handleResponses(req, res, ctx, rawBody, method, pathname, 
             capturedSessionId = sid;
             turn.rememberSession(sid);
         }, (event) => {
-            if (event.type === "thinking")
+            if (event.type === "thinking") {
                 native.onThinking(event.text);
-            else if (event.type === "tool")
+                for (const extra of liveNatives(turn.threadKey))
+                    extra.onThinking(event.text);
+            }
+            else if (event.type === "tool") {
                 native.onTool(event);
+                for (const extra of liveNatives(turn.threadKey))
+                    extra.onTool(event);
+            }
         });
         streamStarted = true;
         runAgentStream(config, workspaceDir, effectiveChatOnly, cmdArgs, parseLine, tempDir, promptForAgent, configDir, abortController.signal, modelCatalogName)

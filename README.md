@@ -6,9 +6,9 @@ These patches overlay **[cursor-api-proxy](https://github.com/anyrobert/cursor-a
 
 | This release | Codex Desktop | cursor-api-proxy |
 | --- | --- | --- |
-| `26.908.70816` | `26.908.70816` (build `9275`) | `1.4.0` |
+| `26.908.70816-2` | `26.908.70816` (build `9275`) | `1.4.0` |
 
-The Git tag **is** Desktop’s `CFBundleShortVersionString`. A second overlay for the same Desktop build is `26.908.70816-2`. If Desktop updates, wait for a matching tag before overlaying.
+The Git tag matches Desktop’s `CFBundleShortVersionString`, with `-2` / `-3` for overlay-only fixes on the same Desktop build.
 
 ## Quick start
 
