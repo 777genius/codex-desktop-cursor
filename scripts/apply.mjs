@@ -21,6 +21,7 @@ const FILES = [
   ["cli-stream-parser.js", "lib/cli-stream-parser.js"],
   ["responses-native.js", "lib/responses-native.js"],
   ["sse-contract.js", "lib/sse-contract.js"],
+  ["stream-trace.js", "lib/stream-trace.js"],
   ["process.js", "lib/process.js"],
   ["process-tree-kill.js", "lib/process-tree-kill.js"],
   ["openai.js", "lib/openai.js"],

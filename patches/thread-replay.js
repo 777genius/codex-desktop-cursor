@@ -154,17 +154,19 @@ export function extractFinalText(rec) {
 
 export function extractThinkingText(rec) {
     const commentary = commentaryIdsFrom(rec);
-    let text = "";
+    let reasoning = "";
+    let comments = "";
     for (const ev of rec.events || []) {
         if (ev.type === "response.reasoning_summary_text.delta" && typeof ev.data?.delta === "string") {
             if (/^\n?(shell_command|shell) (running|done)\n$/.test(ev.data.delta))
                 continue;
-            text += ev.data.delta;
+            reasoning += ev.data.delta;
             continue;
         }
         if (ev.type === "response.output_text.delta" && typeof ev.data?.delta === "string" && commentary.has(ev.data.item_id))
-            text += ev.data.delta;
+            comments += ev.data.delta;
     }
+    const text = reasoning || comments;
     if (text.length > THINKING_CAP)
         return `${text.slice(0, 12000)}\n…\n${text.slice(-12000)}`;
     return text;
@@ -224,6 +226,9 @@ export function extractTurnHistory(rec) {
         if (ev.type === "response.output_item.done" && item?.type === "message" && item.phase === "commentary") {
             flushThought();
             const text = itemText(item).trim();
+            const last = steps[steps.length - 1];
+            if (text && last?.kind === "thought" && last.text === text)
+                continue;
             if (text && !isStub(text))
                 steps.push({ kind: "thought", text });
             continue;

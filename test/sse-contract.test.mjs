@@ -1,3 +1,5 @@
+process.env.CURSOR_BRIDGE_TRACE = "0";
+
 import { createResponsesNativeStream, emitCompactContinue, emitCompactReplay, emitFailed, emitInFlightSnapshot } from "../patches/responses-native.js";
 import { assertResponsesTerminal, parseSse } from "../patches/sse-contract.js";
 import { extractFinalText, extractThinkingText, extractTurnHistory, beginLiveTurn, bufferEvent, completeLiveTurn, peekLiveTurn, getLiveTurn, promptHash, rewriteResponseId } from "../patches/thread-replay.js";
@@ -301,8 +303,13 @@ function collectWrite(res) {
         throw new Error("first thought must stream as reasoning_summary_text.delta");
     if (!events.some((e) => e.event === "response.reasoning_summary_text.delta" && e.data?.delta === "second thought"))
         throw new Error("second thought must stream as reasoning_summary_text.delta");
-    if (events.some((e) => e.data?.item?.phase === "commentary"))
-        throw new Error("thoughts must use native reasoning items, not commentary messages");
+    const commentaryAdded = events.filter((e) => e.event === "response.output_item.added" && e.data?.item?.phase === "commentary");
+    if (commentaryAdded.length !== 2)
+        throw new Error(`expected two visible commentary items between tools, got ${commentaryAdded.length}`);
+    if (!events.some((e) => e.event === "response.output_text.delta" && e.data?.delta === "first thought"))
+        throw new Error("first thought must also stream as visible commentary");
+    if (!events.some((e) => e.event === "response.output_text.delta" && e.data?.delta === "second thought"))
+        throw new Error("second thought must also stream as visible commentary");
     if (!events.some((e) => e.data?.item?.type === "function_call" && e.data.item.name === "exec_command" && String(e.data.item.arguments || "").includes("ls")))
         throw new Error("shell must surface as exec_command, not web search");
     if (events.some((e) => e.data?.item?.type === "web_search_call"))
@@ -580,6 +587,52 @@ function collectWrite(res) {
     if (!rec.lastPromptHash || rec.lastPromptHash === "old-hash")
         throw new Error("new prompt must update lastPromptHash");
     console.log("ok stale lastOutputText dropped on new prompt");
+}
+
+{
+    beginLiveTurn("thread:dual", promptHash("d"));
+    bufferEvent("thread:dual", "response.output_item.added", {
+        item: { id: "msg_c", type: "message", phase: "commentary", role: "assistant" },
+    });
+    bufferEvent("thread:dual", "response.reasoning_summary_text.delta", { delta: "plan" });
+    bufferEvent("thread:dual", "response.output_text.delta", { item_id: "msg_c", delta: "plan" });
+    if (extractThinkingText(getLiveTurn("thread:dual", promptHash("d"))) !== "plan")
+        throw new Error("dual-emitted thinking must not concatenate commentary onto reasoning");
+    console.log("ok dual-emitted thinking is not doubled");
+}
+
+{
+    const { createStreamParser } = await import("../patches/cli-stream-parser.js");
+    const texts = [];
+    const events = [];
+    const parse = createStreamParser(
+        (delta) => texts.push(delta),
+        () => events.push({ type: "done" }),
+        () => {},
+        (ev) => events.push(ev),
+    );
+    parse(JSON.stringify({ type: "system", subtype: "init" }));
+    parse(JSON.stringify({ type: "thinking", subtype: "delta", text: "checking Render" }));
+    parse(JSON.stringify({ type: "thinking", subtype: "completed", text: "checking Render" }));
+    parse(JSON.stringify({
+        type: "tool_call",
+        subtype: "started",
+        call_id: "t1",
+        name: "Shell",
+        args: { command: "curl https://example" },
+    }));
+    parse(JSON.stringify({ type: "thinking", subtype: "delta", text: "waiting on deploy" }));
+    parse(JSON.stringify({ type: "assistant", text: "deploy is live" }));
+    parse(JSON.stringify({ type: "result", subtype: "success" }));
+    if (events.filter((e) => e.type === "thinking").map((e) => e.text).join("") !== "checking Renderwaiting on deploy")
+        throw new Error(`parser thinking ${JSON.stringify(events)}`);
+    if (!events.some((e) => e.type === "tool" && e.name === "Shell"))
+        throw new Error("parser must emit tool");
+    if (texts.join("") !== "deploy is live")
+        throw new Error(`parser text too early: ${texts.join("")}`);
+    if (!events.some((e) => e.type === "done"))
+        throw new Error("parser must finish on result success");
+    console.log("ok stream-json thinking then tools then one assistant");
 }
 
 

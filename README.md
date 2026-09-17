@@ -6,7 +6,7 @@ These patches overlay **[cursor-api-proxy](https://github.com/anyrobert/cursor-a
 
 | This release | Codex Desktop | cursor-api-proxy |
 | --- | --- | --- |
-| `26.908.70816-4` | `26.908.70816` (build `9275`) | `1.4.0` |
+| `26.908.70816-5` | `26.908.70816` (build `9275`) | `1.4.0` |
 
 The Git tag matches Desktop’s `CFBundleShortVersionString`, with `-2` / `-3` for overlay-only fixes on the same Desktop build.
 
@@ -64,10 +64,11 @@ In Desktop, pick a `*-cursor` model (Mixin catalog) or the `cursor_proxy` provid
 ## What you get
 
 - Official ChatGPT models unchanged (`model_provider = "codex-mixin"`).
-- Cursor thinking → Desktop **Thought** accordion (`type: reasoning`).
+- Cursor thinking → Desktop **Thought** accordion (`type: reasoning`) **and** a clipped visible note between **Ran** cards (Cursor only sends the assistant blob at the end).
 - Read / grep / shell → Desktop **Read** / **Ran** (`function_call` `exec_command`).
 - Web search / fetch → Desktop **Searched the web**.
 - Thread id → Cursor `chatId` in `~/.cursor-api-proxy/thread-sessions.json` so a proxy restart does not fork a new chat.
+- Schema-only stream log at `~/.cursor-api-proxy/contract-trace.jsonl` (types/keys/mapped, no payloads). Set `CURSOR_BRIDGE_TRACE=0` to disable.
 
 ## Versioning
 

@@ -1,4 +1,5 @@
 import { readSessionIdFromObject } from "./cursor-turn.js";
+import { traceInbound } from "./stream-trace.js";
 
 function asArray(value) {
     return Array.isArray(value) ? value : [];
@@ -194,6 +195,7 @@ export function createStreamParser(onText, onDone, onSessionId, onEvent) {
                     if (onEvent)
                         onEvent({ type: "tool", ...tool });
                 }
+                traceInbound(obj, "tool");
             }
             const thinking = thinkingDeltaFromEvent(obj);
             if (thinking && onEvent) {
@@ -210,6 +212,8 @@ export function createStreamParser(onText, onDone, onSessionId, onEvent) {
                         ? thinking
                         : thinkingAccumulated + thinking;
                 }
+                if (!tool)
+                    traceInbound(obj, "thinking");
             }
             const text = assistantTextFromEvent(obj);
             if (text && (obj.type === "assistant" || obj.type === "text")) {
@@ -225,6 +229,20 @@ export function createStreamParser(onText, onDone, onSessionId, onEvent) {
                     onText(text);
                     accumulated += text;
                 }
+                if (!tool && !thinking)
+                    traceInbound(obj, "text");
+            }
+            else if (!tool && !thinking) {
+                let mapped = "ignored";
+                if (obj.type === "result")
+                    mapped = "result";
+                else if (obj.type === "system" || obj.type === "user")
+                    mapped = "meta";
+                else if (obj.type === "thinking" || obj.type === "reasoning")
+                    mapped = "thinking_done";
+                else if (obj.type === "assistant" || obj.type === "text")
+                    mapped = "text_empty";
+                traceInbound(obj, mapped);
             }
             if (obj.type === "result" && (obj.subtype === "success" || obj.subtype == null)) {
                 done = true;

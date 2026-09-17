@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { traceOutbound } from "./stream-trace.js";
 
 const RESULT_LIMIT = 8000;
 
@@ -157,6 +158,12 @@ export function createResponsesNativeStream(opts) {
         if (seenSse.size < 20 && !seenSse.has(type)) {
             seenSse.add(type);
             console.log(`[sse] ${type}`);
+        }
+        if (type === "response.output_item.added" || type === "response.output_item.done" || type === "response.completed" || type === "response.failed") {
+            traceOutbound(type, {
+                itemType: data?.item?.type || null,
+                mapped: data?.item?.phase || data?.item?.name || data?.response?.status || "sse",
+            });
         }
         return writeEventRaw(type, data);
     };
@@ -398,6 +405,8 @@ export function createResponsesNativeStream(opts) {
         return rec;
     };
 
+    const COMMENTARY_CAP = 2000;
+
     const onThinking = (delta) => {
         if (finished || !delta)
             return;
@@ -410,6 +419,24 @@ export function createResponsesNativeStream(opts) {
             output_index: reasoning._index,
             summary_index: 0,
             delta,
+        });
+        // Cursor stream-json has no assistant deltas between tools — only
+        // thinking, then one assistant blob at result. Surface a clipped
+        // copy as commentary so Desktop is not a tool list until the end.
+        startCommentary();
+        if (commentary.text.length >= COMMENTARY_CAP)
+            return;
+        const room = COMMENTARY_CAP - commentary.text.length;
+        const chunk = delta.length > room ? `${delta.slice(0, Math.max(0, room - 1))}…` : delta;
+        if (!chunk)
+            return;
+        commentary.text += chunk;
+        writeEvent("response.output_text.delta", {
+            response_id: responseId,
+            item_id: commentary.id,
+            output_index: commentary._index,
+            content_index: 0,
+            delta: chunk,
         });
     };
 
