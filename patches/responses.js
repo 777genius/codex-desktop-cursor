@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { buildAgentFixedArgs } from "../agent-cmd-args.js";
+import { buildAgentFixedArgs, resolveAgentCliTurn } from "../agent-cmd-args.js";
 import { getAccountStats, getNextAccountConfigDir, reportRateLimit, reportRequestEnd, reportRequestError, reportRequestStart, reportRequestSuccess, } from "../account-pool.js";
 import { BRIDGE_AGENT_PROMPT_SEPARATOR, buildBridgeContextPreamble, } from "../bridge-context-preamble.js";
 import { json, writeSseHeaders } from "../http.js";
 import { runAgentStream, runAgentSync, startAgentToolSession, } from "../agent-runner.js";
 import { createStreamParser } from "../cli-stream-parser.js";
+import { loadOverlayMapping } from "../overlay-reload.js";
 import { resolveModelForExecution } from "../model-map.js";
 import { buildPromptFromMessages, normalizeModelId, responsesInputToMessages, toolsToSystemText, } from "../openai.js";
 import { logAccountAssigned, logAccountStats, logAgentError, logModelResolution, logTrafficRequest, logTrafficResponse, } from "../request-log.js";
@@ -14,8 +15,8 @@ import { resolveRequestWorkspaceHeader } from "../codex-desktop.js";
 import { extractCodexThreadId, prepareAgentInvocation, sessionIdFromStdout } from "../cursor-turn.js";
 import { createResponsesNativeStream, emitCompactContinue, emitCompactReplay, emitInFlightSnapshot } from "../responses-native.js";
 import { acquireThreadLock } from "../thread-lock.js";
-import { markThreadOutput, markThreadPrompt, rememberCall, rememberResponse, threadKeyFromFollowUp } from "../thread-session.js";
-import { addLiveSink, beginLiveTurn, bufferEvent, completeLiveTurn, extractFinalText, extractThinkingText, getLiveRecord, getLiveTurn, peekLiveTurn, promptHash, rewriteResponseId, } from "../thread-replay.js";
+import { getThreadSession, markThreadOutput, markThreadPrompt, rememberCall, rememberResponse, threadKeyFromFollowUp } from "../thread-session.js";
+import { addLiveSink, beginLiveTurn, bufferEvent, completeLiveTurn, extractFinalText, extractThinkingText, followUpReplayText, getLiveRecord, getLiveTurn, markCompletedDelivered, peekLiveTurn, promptHash, rewriteResponseId, } from "../thread-replay.js";
 import { sanitizeMessages } from "../sanitize.js";
 import { resolveWorkspace } from "../workspace.js";
 import { fitPromptToWinCmdline, warnPromptTruncated, } from "../win-cmdline-limit.js";
@@ -23,6 +24,21 @@ import { abortOnClientDisconnect } from "../client-disconnect.js";
 import { isDesktopExecFollowUp, parseOpenAiFunctionTools, resolveToolChoice, responsesToolOutputs, } from "../tool-types.js";
 import { ToolSessionError, toolSessionOwnerKey, } from "../tool-session-registry.js";
 import { getCachedCursorModels } from "./models.js";
+
+let nativeApi = {
+    createResponsesNativeStream,
+    emitCompactContinue,
+    emitCompactReplay,
+    emitInFlightSnapshot,
+};
+let parserApi = { createStreamParser };
+
+async function refreshOverlayMapping() {
+    const next = await loadOverlayMapping();
+    nativeApi = next.native;
+    parserApi = next.parser;
+}
+
 function isRateLimited(stderr) {
     return /\b429\b|rate.?limit|too many requests/i.test(stderr);
 }
@@ -344,6 +360,9 @@ function writeToLiveSinks(threadKey, fallbackRes, fallbackId, type, data) {
         const payload = sink.id === fromId ? data : rewriteResponseId(data, fromId, sink.id);
         writeResponseEvent(sink.res, type, payload);
         if (type === "response.completed") {
+            const delivered = String(payload?.response?.output_text || "").trim();
+            if (sinkOpen(sink) && delivered)
+                markCompletedDelivered(threadKey);
             try {
                 if (sinkOpen(sink))
                     sink.res.write("data: [DONE]\n\n");
@@ -358,16 +377,21 @@ function writeToLiveSinks(threadKey, fallbackRes, fallbackId, type, data) {
 function endLiveSinks(threadKey, fallbackRes) {
     const rec = getLiveRecord(threadKey);
     const sinks = rec?.sinks?.length ? rec.sinks : [{ res: fallbackRes }];
-    const text = extractFinalText(rec) || "";
+    const text = (extractFinalText(rec) || extractThinkingText(rec) || "").trim();
     for (const sink of sinks) {
         try {
             if (!sinkOpen(sink))
                 continue;
             if (sink.native && typeof sink.native.finish === "function" && !sink.native.isFinished?.()) {
+                const have = String(sink.native.getText?.() || "");
+                if (text && !have)
+                    sink.native.onText(text);
+                else if (text && text.startsWith(have) && text.length > have.length)
+                    sink.native.onText(text.slice(have.length));
                 sink.native.finish();
             }
             else if (sink.compact) {
-                emitCompactContinue({
+                nativeApi.emitCompactContinue({
                     res: sink.res,
                     writeEvent: (type, data) => writeResponseEvent(sink.res, type, data),
                     responseId: sink.id,
@@ -395,14 +419,18 @@ async function reattachLiveStream({ res, responseId, threadKey, body, displayMod
     if (typeof res.flushHeaders === "function")
         res.flushHeaders();
     const thinking = extractThinkingText(rec) || "";
-    console.log(`[reattach] ${threadKey} hang events=${rec.events.length} thinking=${thinking.length}`);
+    const textSoFar = extractFinalText(rec) || "";
+    console.log(`[reattach] ${threadKey} hang events=${rec.events.length} thinking=${thinking.length} text=${textSoFar.length}`);
     rememberResponse(threadKey, responseId);
-    const native = emitInFlightSnapshot({
+    const native = nativeApi.emitInFlightSnapshot({
         res,
         writeEvent: (type, data) => {
             const callId = data?.item?.call_id || data?.item?.callId;
             if (callId)
                 rememberCall(threadKey, callId);
+            const delivered = String(data?.response?.output_text || "").trim();
+            if (type === "response.completed" && delivered)
+                markCompletedDelivered(threadKey);
             writeResponseEvent(res, type, data);
         },
         responseId,
@@ -412,6 +440,8 @@ async function reattachLiveStream({ res, responseId, threadKey, body, displayMod
         thinking: thinking || "Working…",
         keepOpen: true,
     });
+    if (textSoFar)
+        native.onText(textSoFar);
     addLiveSink(threadKey, {
         res,
         id: responseId,
@@ -447,6 +477,7 @@ function responseContentText(message) {
     return "";
 }
 export async function handleResponses(req, res, ctx, rawBody, method, pathname, remoteAddress) {
+    await refreshOverlayMapping();
     const { config, lastRequestedModelRef, modelCacheRef } = ctx;
     const body = JSON.parse(rawBody || "{}");
     let selectedTools;
@@ -537,12 +568,18 @@ export async function handleResponses(req, res, ctx, rawBody, method, pathname, 
             return;
         }
         // Tool-output follow-up is plumbing, not a new assistant turn.
-        // Replaying a finished turn's text here is how 019fc3aa duplicated
-        // the ranking essay after Desktop POSTed exec_command outputs.
-        const replayText = " ";
+        // Desktop's WS dies ~10 min in and retries with thousands of
+        // function_call_outputs. Mixin may already have completed; Desktop
+        // did not. Replay this prompt's answer. A space compact paints a
+        // blank bubble (019fc3aa 12:13Z). New user text is not this path.
+        const replayText = followUpReplayText(
+            followThreadKey,
+            getThreadSession(followThreadKey)?.lastOutputText,
+        );
+        console.log(`[exec-followup] replay=${replayText.length} delivered=${replayText ? "text" : "empty"}`);
         if (body.stream) {
             writeSseHeaders(res);
-            emitCompactReplay({
+            nativeApi.emitCompactReplay({
                 res,
                 writeEvent: (type, data) => writeResponseEvent(res, type, data),
                 responseId: id,
@@ -747,7 +784,7 @@ export async function handleResponses(req, res, ctx, rawBody, method, pathname, 
             contextExtra: config.contextExtra,
         })}${BRIDGE_AGENT_PROMPT_SEPARATOR}${prompt}`
         : prompt;
-    const agentPrompt = turn.resumed ? turn.agentPrompt : seededPrompt;
+    const { historyFile, agentPrompt } = resolveAgentCliTurn(turn, seededPrompt);
     const turnHash = promptHash(turn.agentPrompt);
     const cachedTurn = getLiveTurn(turn.threadKey, turnHash);
     // Replay only the answer produced for THIS prompt. lastOutputText from an
@@ -758,7 +795,7 @@ export async function handleResponses(req, res, ctx, rawBody, method, pathname, 
         writeSseHeaders(res);
         if (typeof res.flushHeaders === "function")
             res.flushHeaders();
-        emitCompactReplay({
+        nativeApi.emitCompactReplay({
             res,
             writeEvent: (type, data) => writeResponseEvent(res, type, data),
             responseId: id,
@@ -773,9 +810,11 @@ export async function handleResponses(req, res, ctx, rawBody, method, pathname, 
     }
     if (turn.resumed)
         console.log(`[resume] ${turn.threadKey} chat=${turn.resumeChatId} bytes=${turn.agentPrompt.length}`);
+    else if (historyFile)
+        console.log(`[seed] ${turn.threadKey} history=${turn.historyMessages.length} file prompt=${turn.agentPrompt.length}`);
     else
         console.log(`[seed] ${turn.threadKey} bytes=${agentPrompt.length}`);
-    const fixedArgs = buildAgentFixedArgs(config, workspaceDir, cursorModel, !!body.stream, mode, effectiveChatOnly, turn.resumeChatId);
+    const fixedArgs = buildAgentFixedArgs(config, workspaceDir, cursorModel, !!body.stream, mode, effectiveChatOnly, turn.resumeChatId, historyFile);
     const fit = fitPromptToWinCmdline(config.agentBin, fixedArgs, agentPrompt, {
         maxCmdline: config.winCmdlineMax,
         platform: process.platform,
@@ -932,7 +971,7 @@ export async function handleResponses(req, res, ctx, rawBody, method, pathname, 
         const stopKeepalive = startSseKeepalive(() => getLiveRecord(turn.threadKey)?.sinks || [{ res, id }], () => writeTracked("response.in_progress", {
             response: { id, object: "response", status: "in_progress" },
         }), () => lastEventAt);
-        const native = createResponsesNativeStream({
+        const native = nativeApi.createResponsesNativeStream({
             res,
             writeEvent: writeTracked,
             responseId: id,
@@ -1006,7 +1045,7 @@ export async function handleResponses(req, res, ctx, rawBody, method, pathname, 
                 .finally(() => {
                 stopKeepalive();
                 completeLiveTurn(turn.threadKey);
-                markThreadOutput(turn.threadKey, extractFinalText(getLiveTurn(turn.threadKey, turnHash)));
+                markThreadOutput(turn.threadKey, followUpReplayText(turn.threadKey));
                 unlock();
             });
             return;
@@ -1020,7 +1059,7 @@ export async function handleResponses(req, res, ctx, rawBody, method, pathname, 
             finishStream(text);
         };
         let capturedSessionId;
-        const parseLine = createStreamParser((text) => {
+        const parseLine = parserApi.createStreamParser((text) => {
             accumulated = native.onText(text);
             for (const extra of liveNatives(turn.threadKey))
                 extra.onText(text);
@@ -1081,7 +1120,7 @@ export async function handleResponses(req, res, ctx, rawBody, method, pathname, 
             .finally(() => {
             stopKeepalive();
             completeLiveTurn(turn.threadKey);
-            markThreadOutput(turn.threadKey, extractFinalText(getLiveTurn(turn.threadKey, turnHash)));
+            markThreadOutput(turn.threadKey, followUpReplayText(turn.threadKey));
             unlock();
         });
         return;
