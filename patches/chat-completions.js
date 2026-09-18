@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { getCachedCursorModels } from "./models.js";
-import { buildAgentFixedArgs } from "../agent-cmd-args.js";
+import { buildAgentFixedArgs, resolveAgentCliTurn } from "../agent-cmd-args.js";
 import { runAgentStream, runAgentSync, startAgentToolSession, } from "../agent-runner.js";
 import { createStreamParser } from "../cli-stream-parser.js";
 import { json, writeSseHeaders } from "../http.js";
@@ -314,8 +314,8 @@ export async function handleChatCompletions(req, res, ctx, rawBody, method, path
             contextExtra: config.contextExtra,
         })}${BRIDGE_AGENT_PROMPT_SEPARATOR}${prompt}`
         : prompt;
-    const agentPrompt = turn.resumed ? turn.agentPrompt : seededPrompt;
-    const fixedArgs = buildAgentFixedArgs(config, workspaceDir, cursorModel, !!body.stream, mode, effectiveChatOnly, turn.resumeChatId);
+    const { historyFile, agentPrompt } = resolveAgentCliTurn(turn, seededPrompt);
+    const fixedArgs = buildAgentFixedArgs(config, workspaceDir, cursorModel, !!body.stream, mode, effectiveChatOnly, turn.resumeChatId, historyFile);
     const fit = fitPromptToWinCmdline(config.agentBin, fixedArgs, agentPrompt, {
         maxCmdline: config.winCmdlineMax,
         platform: process.platform,

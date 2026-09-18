@@ -1,10 +1,15 @@
 /**
  * CLI flags and options for the Cursor agent, excluding the final prompt argument.
  */
-export function buildAgentFixedArgs(config, workspaceDir, model, stream, mode, effectiveChatOnly, resumeChatId) {
+import { writeConversationHistoryFile } from "./conversation-history.js";
+
+export function buildAgentFixedArgs(config, workspaceDir, model, stream, mode, effectiveChatOnly, resumeChatId, historyFile) {
     const args = ["--print"];
     if (resumeChatId) {
         args.push("--resume", resumeChatId);
+    }
+    else if (historyFile) {
+        args.push("--conversation-history-file", historyFile);
     }
     if (config.approveMcps)
         args.push("--approve-mcps");
@@ -28,12 +33,22 @@ export function buildAgentFixedArgs(config, workspaceDir, model, stream, mode, e
     }
     return args;
 }
+
+/** Same prompt/history/resume split responses + chat + anthropic use. */
+export function resolveAgentCliTurn(turn, seededPrompt) {
+    const historyFile = !turn.resumed && turn.historyMessages?.length
+        ? writeConversationHistoryFile(turn.threadKey, turn.historyMessages)
+        : undefined;
+    const agentPrompt = turn.resumed || turn.historyMessages?.length ? turn.agentPrompt : seededPrompt;
+    return { historyFile, agentPrompt };
+}
+
 /**
  * Build CLI arguments for running the Cursor agent.
  */
-export function buildAgentCmdArgs(config, workspaceDir, model, prompt, stream, mode, effectiveChatOnly, resumeChatId) {
+export function buildAgentCmdArgs(config, workspaceDir, model, prompt, stream, mode, effectiveChatOnly, resumeChatId, historyFile) {
     return [
-        ...buildAgentFixedArgs(config, workspaceDir, model, stream, mode, effectiveChatOnly, resumeChatId),
+        ...buildAgentFixedArgs(config, workspaceDir, model, stream, mode, effectiveChatOnly, resumeChatId, historyFile),
         prompt,
     ];
 }

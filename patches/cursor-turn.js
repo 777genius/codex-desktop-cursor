@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { cursorChatUsable } from "./cursor-chat.js";
 import { deleteThreadSession, fingerprintsEqual, getThreadSession, putThreadSession, } from "./thread-session.js";
+import { splitHistoryAndLastUser } from "./conversation-history.js";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const UUID_CAPTURE = "([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})";
@@ -178,12 +179,10 @@ function firstUserBlock(prompt) {
     return (next >= 0 ? body.slice(0, next) : body).trim().slice(0, 4000);
 }
 
-function prefixHash(prompt, lastUser, model, mode, workspace) {
+function prefixHash(prompt, lastUser, mode, workspace) {
     const seed = firstUserBlock(prompt);
     return createHash("sha256")
         .update(seed)
-        .update("\0")
-        .update(model || "")
         .update("\0")
         .update(mode || "")
         .update("\0")
@@ -196,7 +195,7 @@ export function resolveThreadKey(input) {
     const threadId = extractCodexThreadId(input.headers, input.body, input.prompt);
     if (threadId)
         return `thread:${threadId}`;
-    return `prefix:${prefixHash(input.prompt, input.lastUser, input.model, input.mode, input.workspace)}`;
+    return `prefix:${prefixHash(input.prompt, input.lastUser, input.mode, input.workspace)}`;
 }
 
 export function prepareAgentInvocation(input, opts = {}) {
@@ -242,25 +241,33 @@ export function prepareAgentInvocation(input, opts = {}) {
         forgetSession();
     };
     if (canResume) {
-        if (!opts.silent)
-            console.log(`[resume] ${threadKey} chat=${rec.chatId} bytes=${lastUser.length}`);
+        if (!opts.silent) {
+            const modelBit = rec.model && rec.model !== fp.model
+                ? ` model ${rec.model} → ${fp.model}`
+                : "";
+            console.log(`[resume] ${threadKey} chat=${rec.chatId}${modelBit} bytes=${lastUser.length}`);
+        }
         return {
             agentPrompt: lastUser,
             resumeChatId: rec.chatId,
             threadKey,
             resumed: true,
+            historyMessages: [],
             rememberSession,
             forgetSession,
             commitSession,
         };
     }
+    const split = splitHistoryAndLastUser(input.messages, lastUser);
+    const importHistory = split.prior.length > 0 && Boolean(split.prompt);
     if (!opts.silent)
-        console.log(`[seed] ${threadKey} bytes=${input.fullPrompt.length}`);
+        console.log(`[seed] ${threadKey} bytes=${importHistory ? split.prompt.length : input.fullPrompt.length} history=${split.prior.length}`);
     return {
-        agentPrompt: input.fullPrompt,
+        agentPrompt: importHistory ? split.prompt : input.fullPrompt,
         resumeChatId: undefined,
         threadKey,
         resumed: false,
+        historyMessages: importHistory ? split.prior : [],
         rememberSession,
         forgetSession,
         commitSession,

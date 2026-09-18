@@ -5,21 +5,34 @@ import * as path from "node:path";
 
 const DEFAULT_STORE_PATH = path.join(os.homedir(), ".cursor-api-proxy", "thread-sessions.json");
 let memoryStore;
+let memoryStoreMtime = 0;
 
 function storePath() {
     return process.env.CURSOR_BRIDGE_THREAD_SESSIONS || DEFAULT_STORE_PATH;
 }
 
+function storeMtime() {
+    try {
+        return fs.statSync(storePath()).mtimeMs;
+    }
+    catch {
+        return 0;
+    }
+}
+
 function readStore() {
-    if (memoryStore)
+    const mtime = storeMtime();
+    if (memoryStore && mtime && mtime === memoryStoreMtime)
         return memoryStore;
     try {
         const raw = fs.readFileSync(storePath(), "utf8");
         const parsed = JSON.parse(raw);
         memoryStore = parsed && typeof parsed === "object" ? parsed : {};
+        memoryStoreMtime = mtime;
     }
     catch {
-        memoryStore = {};
+        memoryStore = memoryStore && typeof memoryStore === "object" ? memoryStore : {};
+        memoryStoreMtime = mtime;
     }
     return memoryStore;
 }
@@ -32,12 +45,20 @@ function writeStore(store) {
     const tmp = `${dest}.${process.pid}.tmp`;
     fs.writeFileSync(tmp, `${JSON.stringify(store, null, 2)}\n`, "utf8");
     fs.renameSync(tmp, dest);
+    memoryStoreMtime = storeMtime();
 }
 
+/**
+ * Desktop model picker must keep the same Cursor chat. `--resume` plus a
+ * new `--model` is how history survives a switch. Mode can change with the
+ * picker too (ask ↔ agent). Only a different workspace is a different chat.
+ */
 export function fingerprintsEqual(a, b) {
-    return a?.model === b.model &&
-        a?.mode === b.mode &&
-        a?.workspace === b.workspace;
+    if (!a || !b)
+        return false;
+    if (a.workspace && b.workspace && a.workspace !== b.workspace)
+        return false;
+    return true;
 }
 
 function indexMap(store, name) {
@@ -60,6 +81,7 @@ function capIndex(map, max = 800) {
 
 export function resetStoreForTest() {
     memoryStore = undefined;
+    memoryStoreMtime = 0;
 }
 
 export function rememberResponse(threadKey, responseId) {
@@ -171,12 +193,11 @@ export function markThreadPrompt(threadKey, prompt) {
     if (!rec || !prompt)
         return;
     const lastPromptHash = createHash("sha256").update(prompt).digest("hex").slice(0, 32);
-    const stale = rec.lastPromptHash && rec.lastPromptHash !== lastPromptHash;
     putThreadSession(threadKey, {
         ...rec,
         lastPromptHash,
         lastPromptAt: Date.now(),
-        lastOutputText: stale ? "" : rec.lastOutputText,
+        lastOutputText: "",
     });
 }
 

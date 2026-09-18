@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { buildPromptFromAnthropicMessages } from "../anthropic.js";
 import { buildBridgeContextPreamble, BRIDGE_AGENT_PROMPT_SEPARATOR, } from "../bridge-context-preamble.js";
-import { buildAgentFixedArgs } from "../agent-cmd-args.js";
+import { buildAgentFixedArgs, resolveAgentCliTurn } from "../agent-cmd-args.js";
 import { runAgentStream, runAgentSync, startAgentToolSession, } from "../agent-runner.js";
 import { createStreamParser } from "../cli-stream-parser.js";
 import { getCachedCursorModels } from "./models.js";
@@ -373,8 +373,8 @@ export async function handleAnthropicMessages(req, res, ctx, rawBody, method, pa
             contextExtra: config.contextExtra,
         })}${BRIDGE_AGENT_PROMPT_SEPARATOR}${prompt}`
         : prompt;
-    const agentPrompt = turn.resumed ? turn.agentPrompt : seededPrompt;
-    const fixedArgs = buildAgentFixedArgs(config, workspaceDir, cursorModel, !!body.stream, mode, effectiveChatOnly, turn.resumeChatId);
+    const { historyFile, agentPrompt } = resolveAgentCliTurn(turn, seededPrompt);
+    const fixedArgs = buildAgentFixedArgs(config, workspaceDir, cursorModel, !!body.stream, mode, effectiveChatOnly, turn.resumeChatId, historyFile);
     const fit = fitPromptToWinCmdline(config.agentBin, fixedArgs, agentPrompt, {
         maxCmdline: config.winCmdlineMax,
         platform: process.platform,
