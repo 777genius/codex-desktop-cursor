@@ -7,14 +7,10 @@ import { resolveAgentCommand } from "./env.js";
 import { DETACH_CHILDREN, killProcessTree } from "./process-tree-kill.js";
 import { runMaxModePreflight } from "./max-mode-preflight.js";
 const activeChildren = new Set();
-// LaunchAgent CURSOR_BRIDGE_TIMEOUT_MS=900000 SIGKILL'd live /goal resumes
-// (019fc3aa 07:32:24Z -> exit -1 07:47:24Z) while the agent was still writing
-// the Cursor chat. Floor at 45m; kickstart picks this up without plist bootout.
-const MIN_AGENT_TIMEOUT_MS = 45 * 60 * 1000;
-function agentTimeoutMs(requested) {
-    const n = typeof requested === "number" && requested > 0 ? requested : 0;
-    return Math.max(n, MIN_AGENT_TIMEOUT_MS);
-}
+// Never wall-clock SIGKILL cursor-agent. LaunchAgent
+// CURSOR_BRIDGE_TIMEOUT_MS=900000 and the old 45m floor killed 01a0719d
+// mid-turn while stdout was still flowing (14:15Z spawn → exit -1 14:59Z).
+// AbortSignal still SIGTERMs on explicit cancel.
 export function killAllChildProcesses() {
     for (const child of activeChildren) {
         killProcessTree(child, "SIGTERM");
@@ -253,12 +249,6 @@ export function runStreaming(cmd, args, opts) {
             configDir: opts.configDir,
         });
         activeChildren.add(child);
-        const timeoutMs = agentTimeoutMs(opts.timeoutMs);
-        const timeout = timeoutMs > 0
-            ? setTimeout(() => {
-                killProcessTree(child, "SIGKILL");
-            }, timeoutMs)
-            : undefined;
         const onAbort = () => killProcessTree(child, "SIGTERM");
         if (opts.signal) {
             if (opts.signal.aborted) {
@@ -276,8 +266,6 @@ export function runStreaming(cmd, args, opts) {
             ? followStdoutFile(stdoutPath, lines.consume)
             : () => { };
         child.on("error", (err) => {
-            if (timeout)
-                clearTimeout(timeout);
             opts.signal?.removeEventListener("abort", onAbort);
             activeChildren.delete(child);
             stopFollow();
@@ -290,8 +278,6 @@ export function runStreaming(cmd, args, opts) {
             reject(err);
         });
         child.on("close", (code, signal) => {
-            if (timeout)
-                clearTimeout(timeout);
             opts.signal?.removeEventListener("abort", onAbort);
             activeChildren.delete(child);
             killProcessTree(child, "SIGKILL");
@@ -317,12 +303,6 @@ export function run(cmd, args, opts = {}) {
             configDir: opts.configDir,
         });
         activeChildren.add(child);
-        const timeoutMs = agentTimeoutMs(opts.timeoutMs);
-        const timeout = timeoutMs > 0
-            ? setTimeout(() => {
-                killProcessTree(child, "SIGKILL");
-            }, timeoutMs)
-            : undefined;
         const onAbort = () => killProcessTree(child, "SIGTERM");
         if (opts.signal) {
             if (opts.signal.aborted) {
@@ -341,8 +321,6 @@ export function run(cmd, args, opts = {}) {
             child.stdout.on("data", (c) => (stdout += cleanPtyChunk(c)));
         }
         child.on("error", (err) => {
-            if (timeout)
-                clearTimeout(timeout);
             opts.signal?.removeEventListener("abort", onAbort);
             activeChildren.delete(child);
             cleanupStdoutFile(stdoutPath);
@@ -354,8 +332,6 @@ export function run(cmd, args, opts = {}) {
             reject(err);
         });
         child.on("close", (code, signal) => {
-            if (timeout)
-                clearTimeout(timeout);
             opts.signal?.removeEventListener("abort", onAbort);
             activeChildren.delete(child);
             killProcessTree(child, "SIGKILL");
