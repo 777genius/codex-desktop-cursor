@@ -49,6 +49,11 @@ function prettyToolName(key) {
         .replace(/^./, (c) => c.toUpperCase());
 }
 
+function looksLikeJsonBlob(value) {
+    const s = String(value || "").trim();
+    return s.startsWith("{") || s.startsWith("[");
+}
+
 function jsonish(value) {
     if (value == null)
         return "";
@@ -95,11 +100,39 @@ function firstToolCallBlob(obj) {
     return undefined;
 }
 
+export function resultAssistantText(obj) {
+    if (!obj || typeof obj !== "object")
+        return "";
+    if (typeof obj.result === "string")
+        return obj.result;
+    if (typeof obj.error === "string")
+        return obj.error;
+    if (typeof obj.message === "string" && obj.type === "error")
+        return obj.message;
+    const nested = obj.result;
+    if (nested && typeof nested === "object") {
+        if (typeof nested.text === "string")
+            return nested.text;
+        if (typeof nested.result === "string")
+            return nested.result;
+        if (typeof nested.content === "string")
+            return nested.content;
+        if (Array.isArray(nested.content))
+            return nested.content.map(partText).filter(Boolean).join("");
+        const parts = nested.message?.content;
+        if (Array.isArray(parts))
+            return parts.map(partText).filter(Boolean).join("");
+    }
+    return "";
+}
+
 export function parseToolCallEvent(obj) {
     if (!obj || typeof obj !== "object")
         return undefined;
     const type = String(obj.type || "");
     const subtype = String(obj.subtype || "");
+    if (subtype === "delta" || subtype === "partial" || type === "tool_call_delta")
+        return undefined;
     const parts = contentParts(obj);
     const toolParts = parts.filter((p) => {
         const t = String(p?.type || "");
@@ -108,26 +141,52 @@ export function parseToolCallEvent(obj) {
     const isToolEvent = type === "tool_call" || type === "tool-call" || type === "tool_use" || toolParts.length > 0;
     if (!isToolEvent)
         return undefined;
-    const phase = subtype === "completed" || type === "tool_result" || type === "tool-result"
+    const phase = subtype === "completed" || subtype === "error" || subtype === "failed"
+        || type === "tool_result" || type === "tool-result"
         ? "completed"
         : "started";
     const nested = firstToolCallBlob(obj);
     const part = toolParts[0];
-    const name = prettyToolName(nested?.key) ||
+    const data = nested?.value || part || obj;
+    let args = data.args || data.arguments || data.input || part?.args || part?.input || {};
+    if (typeof args === "string") {
+        try {
+            args = JSON.parse(args);
+        }
+        catch {
+            args = { raw: args };
+        }
+    }
+    if (args && typeof args === "object" && !Array.isArray(args)) {
+        const inner = args.args ?? args.arguments;
+        const mcpName = args.toolName || args.tool_name || args.name;
+        if (mcpName && inner != null) {
+            let parsed = inner;
+            if (typeof inner === "string") {
+                try {
+                    parsed = JSON.parse(inner);
+                }
+                catch {
+                    parsed = { raw: inner };
+                }
+            }
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+                args = { ...args, ...parsed };
+        }
+    }
+    const callId = String(obj.call_id || obj.callId || part?.toolCallId || args.toolCallId || args.tool_call_id || obj.id || "");
+    const name = args.toolName || args.tool_name || prettyToolName(nested?.key) ||
         part?.toolName ||
         part?.name ||
         obj.name ||
         obj.toolName ||
         "";
-    const data = nested?.value || part || obj;
-    const args = data.args || data.arguments || data.input || part?.args || part?.input || {};
-    const callId = String(obj.call_id || obj.callId || part?.toolCallId || part?.id || obj.id || "");
     return {
         phase,
         callId,
         name: name || "tool",
         args,
-        result: resultText(data.result ?? obj.result ?? data.output),
+        result: resultText(data.result ?? obj.result ?? data.output ?? args.result),
         argsJson: typeof args === "string" ? args : jsonish(args),
     };
 }
@@ -189,7 +248,9 @@ export function createStreamParser(onText, onDone, onSessionId, onEvent) {
             }
             const tool = parseToolCallEvent(obj);
             if (tool) {
-                const key = `${tool.phase}:${tool.callId || tool.name}:${tool.argsJson.slice(0, 80)}`;
+                const key = tool.callId
+                    ? `${tool.phase}:${tool.callId}`
+                    : `${tool.phase}:${tool.name}:${tool.argsJson.slice(0, 80)}`;
                 if (!seenTools.has(key)) {
                     seenTools.add(key);
                     if (onEvent)
@@ -236,15 +297,32 @@ export function createStreamParser(onText, onDone, onSessionId, onEvent) {
                 let mapped = "ignored";
                 if (obj.type === "result")
                     mapped = "result";
+                else if (obj.type === "error")
+                    mapped = "error";
                 else if (obj.type === "system" || obj.type === "user")
                     mapped = "meta";
                 else if (obj.type === "thinking" || obj.type === "reasoning")
                     mapped = "thinking_done";
                 else if (obj.type === "assistant" || obj.type === "text")
                     mapped = "text_empty";
+                else if (obj.type === "tool_call" && (obj.subtype === "delta" || obj.subtype === "partial"))
+                    mapped = "tool_delta";
                 traceInbound(obj, mapped);
             }
-            if (obj.type === "result" && (obj.subtype === "success" || obj.subtype == null)) {
+            if (obj.type === "result" || obj.type === "error") {
+                const full = resultAssistantText(obj);
+                if (full && full !== accumulated && !looksLikeJsonBlob(full)) {
+                    if (!accumulated) {
+                        onText(full);
+                        accumulated = full;
+                    }
+                    else if (full.startsWith(accumulated)) {
+                        const delta = full.slice(accumulated.length);
+                        if (delta)
+                            onText(delta);
+                        accumulated = full;
+                    }
+                }
                 done = true;
                 onDone();
             }

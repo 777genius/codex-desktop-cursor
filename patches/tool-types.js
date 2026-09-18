@@ -177,7 +177,12 @@ export function responsesToolOutputs(input) {
     const outputs = [];
     for (const value of input) {
         const item = asRecord(value);
-        if (!item || item.type !== "function_call_output")
+        if (!item || (
+            item.type !== "function_call_output"
+            && item.type !== "apply_patch_call_output"
+            && item.type !== "custom_tool_call_output"
+            && item.type !== "local_shell_call_output"
+        ))
             continue;
         const callId = toolCallId(item);
         // Codex Desktop often includes transcript tool results without a
@@ -199,6 +204,8 @@ const TOOL_PLUMBING_TYPES = new Set([
     "custom_tool_call_output",
     "local_shell_call",
     "local_shell_call_output",
+    "apply_patch_call",
+    "apply_patch_call_output",
 ]);
 
 /** Desktop ran exec_command locally and is posting outputs; do not start a new Cursor turn. */
