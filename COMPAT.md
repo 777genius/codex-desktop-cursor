@@ -4,6 +4,7 @@ Overlay releases are named for **this repo**, but they are **tested against a Co
 
 | Overlay | Desktop | Desktop build | cursor-api-proxy | Notes |
 | --- | --- | --- | --- | --- |
+| 26.908.70816-6 | 26.908.70816 | 9275 | 1.4.0 | Same Cursor chat across model switch; apply_patch / update_goal; no wall-clock SIGKILL; replay after Desktop WS drop |
 | 26.908.70816-5 | 26.908.70816 | 9275 | 1.4.0 | Mid-turn thinking is also visible commentary; schema-only contract-trace.jsonl |
 | 26.908.70816-4 | 26.908.70816 | 9275 | 1.4.0 | Exec follow-up is plumbing; reattach remembers response/call ids and emits [DONE] |
 

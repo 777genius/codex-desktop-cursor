@@ -8,7 +8,7 @@ These patches overlay **[cursor-api-proxy](https://github.com/anyrobert/cursor-a
 
 | This release | Codex Desktop | cursor-api-proxy |
 | --- | --- | --- |
-| `26.908.70816-5` | `26.908.70816` (build `9275`) | `1.4.0` |
+| `26.908.70816-6` | `26.908.70816` (build `9275`) | `1.4.0` |
 
 The Git tag matches Desktop’s `CFBundleShortVersionString`, with `-2` / `-3` for overlay-only fixes on the same Desktop build.
 
@@ -52,7 +52,6 @@ export CURSOR_BRIDGE_MODE=agent
 export CURSOR_BRIDGE_FORCE=true
 export CURSOR_BRIDGE_CHAT_ONLY_WORKSPACE=false
 export CURSOR_BRIDGE_CONTEXT_PREAMBLE=false
-export CURSOR_BRIDGE_TIMEOUT_MS=900000
 export CURSOR_BRIDGE_HOST=127.0.0.1
 export CURSOR_BRIDGE_PORT=8765
 # optional: pin a default workspace
@@ -69,6 +68,10 @@ In Desktop, pick a `*-cursor` model (Mixin catalog) or the `cursor_proxy` provid
 - Cursor thinking → Desktop **Thought** accordion (`type: reasoning`) **and** a clipped visible note between **Ran** cards (Cursor only sends the assistant blob at the end).
 - Read / grep / shell → Desktop **Read** / **Ran** (`function_call` `exec_command`).
 - Web search / fetch → Desktop **Searched the web**.
+- File edits → Desktop patch cards (`function_call` `apply_patch` with a `*** Begin Patch` envelope). Mixin cannot decode native `apply_patch_call`.
+- Cursor UpdateGoal → Desktop sidebar `update_goal`.
+- Desktop model picker keeps the same Cursor chat (`--resume`). First seed can import via `--conversation-history-file`.
+- Overlay does not wall-clock SIGKILL a live `cursor-agent`. Abort still cancels.
 - Thread id → Cursor `chatId` in `~/.cursor-api-proxy/thread-sessions.json` so a proxy restart does not fork a new chat.
 - Schema-only stream log at `~/.cursor-api-proxy/contract-trace.jsonl` (types/keys/mapped, no payloads). Set `CURSOR_BRIDGE_TRACE=0` to disable.
 
@@ -82,11 +85,11 @@ Git tags match Codex Desktop (`26.908.70816`). Overlay-only fixes on that same D
 
 ```
 patches/     overlay copied onto cursor-api-proxy/dist/lib/
-test/        SSE contract (Thought / exec_command / no tool replay)
-scripts/     apply, desktop-version
+test/        SSE contract, recorded stream-json pipe, model-switch e2e
+scripts/     apply, reload-idle, desktop-version
 ```
 
-`npm test` does not need Desktop or a Cursor login.
+`npm test` does not need Desktop or a Cursor login. `npm run test:live` runs cheap Cursor Auto.
 
 ## Not in this repo
 
