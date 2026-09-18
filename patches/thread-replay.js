@@ -59,6 +59,11 @@ export function beginLiveTurn(threadKey, hash, meta = {}) {
     const rec = {
         hash,
         events: [],
+        commentaryIds: new Set(),
+        finalText: "",
+        thinkingText: "",
+        commentaryText: "",
+        completedDelivered: false,
         done: false,
         startedAt: Date.now(),
         primaryId: meta.responseId,
@@ -92,11 +97,74 @@ export function getLiveRecord(threadKey) {
     return threadKey ? live.get(threadKey) : undefined;
 }
 
+function usableText(value) {
+    return typeof value === "string" && value.trim() ? value : "";
+}
+
+function absorbLiveText(rec, type, data) {
+    const item = data?.item;
+    if (item?.phase === "commentary" && item.id)
+        rec.commentaryIds.add(item.id);
+    if (type === "response.output_text.delta" && typeof data?.delta === "string") {
+        if (!rec.commentaryIds.has(data.item_id))
+            rec.finalText += data.delta;
+        else
+            rec.commentaryText += data.delta;
+        return;
+    }
+    if (type === "response.reasoning_summary_text.delta" && typeof data?.delta === "string") {
+        if (!/^\n?(shell_command|shell) (running|done)\n$/.test(data.delta))
+            rec.thinkingText += data.delta;
+        return;
+    }
+    if (type === "response.completed") {
+        const done = usableText(data?.response?.output_text);
+        // "\n" / " " completed must not wipe a real answer (019fc3aa 15:11Z
+        // replay=0 after reattach text=488).
+        if (done.trim().length >= (rec.finalText || "").trim().length)
+            rec.finalText = done;
+    }
+}
+
 export function bufferEvent(threadKey, type, data) {
     const rec = live.get(threadKey);
-    if (!rec || rec.events.length >= MAX_EVENTS)
+    if (!rec)
         return;
+    absorbLiveText(rec, type, data);
+    if (rec.events.length >= MAX_EVENTS)
+        rec.events.shift();
     rec.events.push({ type, data });
+}
+
+/** Desktop retry after disconnect: replay this turn's answer if it never landed. */
+export function disconnectedTurnText(threadKey) {
+    const rec = live.get(threadKey);
+    if (!rec?.done || rec.completedDelivered)
+        return "";
+    return (extractFinalText(rec) || "").trim();
+}
+
+export function markCompletedDelivered(threadKey) {
+    const rec = live.get(threadKey);
+    if (rec)
+        rec.completedDelivered = true;
+}
+
+/**
+ * Desktop reconnects ~10 min with thousands of function_call_outputs even
+ * after Mixin already got response.completed. Prefer this turn's live text
+ * (turns run longer than DUP_WINDOW). Fall back to lastOutputText saved at
+ * completeLiveTurn — never a previous prompt's essay.
+ */
+export function followUpReplayText(threadKey, savedOutput) {
+    const rec = threadKey ? live.get(threadKey) : undefined;
+    const liveText = (extractFinalText(rec) || "").trim();
+    if (liveText)
+        return liveText;
+    const saved = typeof savedOutput === "string" ? savedOutput.trim() : "";
+    if (saved)
+        return saved;
+    return (extractThinkingText(rec) || "").trim();
 }
 
 export function completeLiveTurn(threadKey) {
@@ -132,8 +200,8 @@ function itemText(item) {
 export function extractFinalText(rec) {
     if (!rec)
         return "";
-    if (typeof rec.finalText === "string" && rec.finalText)
-        return rec.finalText;
+    if (usableText(rec.finalText))
+        return rec.finalText.trim();
     const skip = commentaryIdsFrom(rec);
     let text = "";
     for (const ev of rec.events || []) {
@@ -143,16 +211,21 @@ export function extractFinalText(rec) {
             text += ev.data.delta;
         }
         if (ev.type === "response.completed") {
-            const done = ev.data?.response?.output_text;
-            if (typeof done === "string" && done)
+            const done = usableText(ev.data?.response?.output_text);
+            if (done.trim().length >= text.trim().length)
                 text = done;
         }
     }
     rec.finalText = text;
-    return text;
+    return (text || "").trim();
 }
 
 export function extractThinkingText(rec) {
+    if (!rec)
+        return "";
+    const live = rec.thinkingText || rec.commentaryText;
+    if (live)
+        return clipThinking(live);
     const commentary = commentaryIdsFrom(rec);
     let reasoning = "";
     let comments = "";
@@ -166,7 +239,10 @@ export function extractThinkingText(rec) {
         if (ev.type === "response.output_text.delta" && typeof ev.data?.delta === "string" && commentary.has(ev.data.item_id))
             comments += ev.data.delta;
     }
-    const text = reasoning || comments;
+    return clipThinking(reasoning || comments);
+}
+
+function clipThinking(text) {
     if (text.length > THINKING_CAP)
         return `${text.slice(0, 12000)}\n…\n${text.slice(-12000)}`;
     return text;
