@@ -1,11 +1,12 @@
 process.env.CURSOR_BRIDGE_TRACE = "0";
 
-import { createResponsesNativeStream, emitCompactContinue, emitCompactReplay, emitFailed, emitInFlightSnapshot } from "../patches/responses-native.js";
+import { createResponsesNativeStream, emitCompactContinue, emitCompactReplay, emitFailed, emitInFlightSnapshot, classifyCursorTool, slimCompletedOutput } from "../patches/responses-native.js";
 import { assertResponsesTerminal, parseSse } from "../patches/sse-contract.js";
-import { extractFinalText, extractThinkingText, extractTurnHistory, beginLiveTurn, bufferEvent, completeLiveTurn, peekLiveTurn, getLiveTurn, promptHash, rewriteResponseId } from "../patches/thread-replay.js";
+import { extractFinalText, extractThinkingText, extractTurnHistory, beginLiveTurn, bufferEvent, completeLiveTurn, peekLiveTurn, getLiveTurn, promptHash, rewriteResponseId, disconnectedTurnText, markCompletedDelivered, followUpReplayText } from "../patches/thread-replay.js";
 import { isDesktopExecFollowUp } from "../patches/tool-types.js";
-import { extractCodexThreadId } from "../patches/cursor-turn.js";
+import { extractCodexThreadId, prepareAgentInvocation } from "../patches/cursor-turn.js";
 import { rememberCall, rememberResponse, resetStoreForTest, threadKeyFromFollowUp, putThreadSession, getThreadSession, markThreadPrompt } from "../patches/thread-session.js";
+import { createStreamParser } from "../patches/cli-stream-parser.js";
 
 function mockRes() {
     let buf = "";
@@ -273,6 +274,30 @@ function collectWrite(res) {
 }
 
 {
+    const res = mockRes();
+    const id = "resp_recovered";
+    const native = emitInFlightSnapshot({
+        res,
+        writeEvent: collectWrite(res),
+        responseId: id,
+        body: {},
+        displayModel: "m",
+        createdAt: 1,
+        thinking: "still running tools",
+        keepOpen: true,
+    });
+    native.onText("goal report that landed while Desktop was reconnecting");
+    native.finish();
+    const events = parseSse(res.dump());
+    if (assertResponsesTerminal(events, id) !== "response.completed")
+        throw new Error("recovered reattach must terminal");
+    const completed = events.find((e) => e.event === "response.completed");
+    if (!String(completed?.data?.response?.output_text || "").includes("goal report that landed"))
+        throw new Error("reattach must ship the answer accumulated before disconnect");
+    console.log("ok reattach seeds pre-disconnect assistant text");
+}
+
+{
     beginLiveTurn("thread:think", promptHash("x"));
     bufferEvent("thread:think", "response.reasoning_summary_text.delta", { delta: "abc" });
     bufferEvent("thread:think", "response.output_text.delta", { delta: "xyz" });
@@ -507,6 +532,59 @@ function collectWrite(res) {
 }
 
 {
+    const classified = classifyCursorTool("Edit", {
+        path: "/Users/belief/dev/projects/review-router/packages/features/review-config/src/domain/review-configuration.ts",
+        old_string: "a",
+        new_string: "b",
+    });
+    if (classified.kind !== "patch" || classified.op !== "update_file")
+        throw new Error(`Edit must classify as apply_patch, got ${JSON.stringify(classified)}`);
+    const res = mockRes();
+    const native = createResponsesNativeStream({
+        res,
+        writeEvent: collectWrite(res),
+        responseId: "resp_edit_native",
+        body: {},
+        displayModel: "m",
+        createdAt: 1,
+        promptTokens: 1,
+    });
+    native.onTool({
+        name: "Edit",
+        callId: "call-edit-native",
+        args: {
+            path: classified.path,
+            old_string: "a",
+            new_string: "b",
+        },
+    });
+    const events = parseSse(res.dump());
+    const call = events.find((e) => e.data?.item?.name === "apply_patch" && e.event === "response.output_item.done");
+    const args = JSON.parse(call?.data?.item?.arguments || "{}");
+    if (!String(args.input || "").includes("review-configuration.ts") || !String(args.input || "").includes("Begin Patch"))
+        throw new Error("native Edit card missing apply_patch envelope");
+    if (events.some((e) => String(e.data?.delta || "").startsWith("Edited ")))
+        throw new Error("native Edit must not be commentary");
+    if (events.some((e) => e.data?.item?.type === "apply_patch_call"))
+        throw new Error("Mixin cannot decode apply_patch_call; use function_call apply_patch");
+    console.log("ok Edit is apply_patch not Edited /path commentary");
+}
+
+{
+    const slim = slimCompletedOutput(Array.from({ length: 80 }, (_, i) => ({
+        type: "function_call",
+        name: "exec_command",
+        call_id: `c${i}`,
+        arguments: "{}",
+    })).concat([{ type: "message", role: "assistant", content: [{ type: "output_text", text: "done" }] }]));
+    if (slim.filter((i) => i.name === "exec_command").length !== 24)
+        throw new Error(`completed must keep a short tool tail, got ${slim.length}`);
+    if (!slim.some((i) => i.type === "message"))
+        throw new Error("completed must keep the assistant message");
+    console.log("ok completed output slims so Mixin can decode it");
+}
+
+{
     if (!isDesktopExecFollowUp({
         input: [{ type: "function_call_output", call_id: "c1", output: "ok" }],
     }, [{ callId: "c1", output: "ok" }]))
@@ -521,6 +599,140 @@ function collectWrite(res) {
     if (isDesktopExecFollowUp({ input: [{ role: "user", content: "hi" }] }, []))
         throw new Error("no outputs is not a follow-up");
     console.log("ok Desktop exec follow-up detection");
+}
+
+{
+    const key = "thread:019fc3aa-overflow";
+    beginLiveTurn(key, "hash-overflow", { responseId: "resp_overflow" });
+    for (let i = 0; i < 8500; i++) {
+        bufferEvent(key, "response.output_item.done", {
+            item: { type: "function_call", name: "exec_command", call_id: `c${i}` },
+        });
+    }
+    bufferEvent(key, "response.output_item.added", {
+        item: { id: "msg_final", type: "message", role: "assistant", phase: "final_answer" },
+    });
+    bufferEvent(key, "response.output_text.delta", {
+        item_id: "msg_final",
+        delta: "goal report after 8000 tool events",
+    });
+    completeLiveTurn(key);
+    const rec = getLiveTurn(key, "hash-overflow");
+    if (!extractFinalText(rec).includes("goal report after 8000 tool events"))
+        throw new Error("answer after 8000 SSE events must still be kept for Desktop reconnect");
+    if (disconnectedTurnText(key) !== "goal report after 8000 tool events")
+        throw new Error("disconnect follow-up must replay the answer that never reached Desktop");
+    markCompletedDelivered(key);
+    if (disconnectedTurnText(key))
+        throw new Error("already-delivered turn must not replay via disconnectedTurnText");
+    if (followUpReplayText(key, "stale previous essay") !== "goal report after 8000 tool events")
+        throw new Error("exec-followup must prefer this turn's text over a previous prompt's lastOutputText");
+    rec.startedAt = Date.now() - (25 * 60 * 1000);
+    if (followUpReplayText(key, "stale previous essay") !== "goal report after 8000 tool events")
+        throw new Error("turns longer than 10min must still keep their answer for Desktop reconnect");
+    if (followUpReplayText("thread:gone", "Source-title карточка больше не валит board.") !== "Source-title карточка больше не валит board.")
+        throw new Error("with no live rec, exec-followup uses saved lastOutputText");
+    console.log("ok overflow buffer keeps final text for disconnect replay");
+}
+
+{
+    const res = mockRes();
+    const id = "resp_disconnect_replay";
+    emitCompactReplay({
+        res,
+        writeEvent: collectWrite(res),
+        responseId: id,
+        body: {},
+        displayModel: "m",
+        createdAt: 1,
+        text: "goal report after 8000 tool events",
+    });
+    const events = parseSse(res.dump());
+    if (assertResponsesTerminal(events, id) !== "response.completed")
+        throw new Error("disconnect compact must terminal");
+    const completed = events.find((e) => e.event === "response.completed");
+    if (completed?.data?.response?.output_text !== "goal report after 8000 tool events")
+        throw new Error("exec-followup after drop must replay the Cursor answer, not a space");
+    console.log("ok disconnect compact replay ships the missed answer");
+}
+
+{
+    const res = mockRes();
+    const id = "resp_silent_followup";
+    emitCompactReplay({
+        res,
+        writeEvent: collectWrite(res),
+        responseId: id,
+        body: {},
+        displayModel: "m",
+        createdAt: 1,
+        text: "",
+    });
+    const events = parseSse(res.dump());
+    if (assertResponsesTerminal(events, id) !== "response.completed")
+        throw new Error("empty follow-up must still terminal");
+    const deltas = events.filter((e) => e.event === "response.output_text.delta").map((e) => e.data?.delta).join("");
+    if (deltas.trim())
+        throw new Error("empty follow-up must not paint a space bubble");
+    console.log("ok empty exec-followup has no visible assistant text");
+}
+
+{
+    const key = "thread:019fc3aa-whitespace-wipe";
+    beginLiveTurn(key, "hash-wipe", { responseId: "resp_wipe" });
+    bufferEvent(key, "response.output_item.added", {
+        item: { id: "msg_final", type: "message", role: "assistant", phase: "final_answer" },
+    });
+    bufferEvent(key, "response.output_text.delta", {
+        item_id: "msg_final",
+        delta: "I'll keep the ranking filter off overnight.",
+    });
+    bufferEvent(key, "response.completed", { response: { output_text: "\n" } });
+    completeLiveTurn(key);
+    if (extractFinalText(getLiveTurn(key, "hash-wipe")) !== "I'll keep the ranking filter off overnight.")
+        throw new Error("whitespace completed must not wipe the reattached answer");
+    if (followUpReplayText(key, "") !== "I'll keep the ranking filter off overnight.")
+        throw new Error("exec-followup must replay the wiped-looking turn");
+    console.log("ok whitespace completed does not wipe final text");
+}
+
+{
+    const key = "thread:019fc3aa-thinking-fallback";
+    beginLiveTurn(key, "hash-think", { responseId: "resp_think" });
+    bufferEvent(key, "response.reasoning_summary_text.delta", {
+        delta: "Continue the social-monitor ranking pass without the 6h stale cutoff.",
+    });
+    bufferEvent(key, "response.completed", { response: { output_text: "\n" } });
+    completeLiveTurn(key);
+    if (followUpReplayText(key, "") !== "Continue the social-monitor ranking pass without the 6h stale cutoff.")
+        throw new Error("empty final text must fall back to thinking so Desktop is not a fake complete");
+    process.env.CURSOR_BRIDGE_THREAD_SESSIONS = `/tmp/cdc-replay-${process.pid}.json`;
+    resetStoreForTest();
+    rememberCall(key, "call_think_1");
+    const res = mockRes();
+    emitCompactReplay({
+        res,
+        writeEvent: collectWrite(res),
+        responseId: "resp_think_replay",
+        body: { input: [{ type: "function_call_output", call_id: "call_think_1", output: "ok" }] },
+        displayModel: "m",
+        createdAt: 1,
+        text: "",
+    });
+    const events = parseSse(res.dump());
+    const completed = events.find((e) => e.event === "response.completed");
+    if (!String(completed?.data?.response?.output_text || "").includes("social-monitor ranking pass"))
+        throw new Error("empty compact replay must recover thinking via call_id");
+    console.log("ok empty compact recovers thinking from live turn");
+}
+
+{
+    let got = "";
+    const parse = createStreamParser((t) => { got += t; }, () => {}, () => {}, () => {});
+    parse(JSON.stringify({ type: "result", subtype: "success", result: { text: "patched ranking without the 6h filter" } }));
+    if (!got.includes("patched ranking without the 6h filter"))
+        throw new Error("object result.text must become assistant output");
+    console.log("ok result object text is not dropped");
 }
 
 {
@@ -586,7 +798,119 @@ function collectWrite(res) {
         throw new Error("дальше must not compact-replay the previous assistant essay");
     if (!rec.lastPromptHash || rec.lastPromptHash === "old-hash")
         throw new Error("new prompt must update lastPromptHash");
+    putThreadSession("thread:019fc3aa-bd72-7ea1-b807-4b9c18ec48bf", {
+        ...rec,
+        lastOutputText: "same continue should still drop",
+    });
+    markThreadPrompt("thread:019fc3aa-bd72-7ea1-b807-4b9c18ec48bf", "дальше");
+    if (getThreadSession("thread:019fc3aa-bd72-7ea1-b807-4b9c18ec48bf").lastOutputText)
+        throw new Error("identical continue prompt is still a new Desktop send");
     console.log("ok stale lastOutputText dropped on new prompt");
+}
+
+{
+    process.env.CURSOR_BRIDGE_THREAD_SESSIONS = `/tmp/cdc-sessions-model-${process.pid}.json`;
+    resetStoreForTest();
+    const thread = "01a0719d-424f-7801-8acf-be9add1e0114";
+    const chatId = "9bed9a12-8ac5-4a4b-82ed-9ec9aba1baf9";
+    putThreadSession(`thread:${thread}`, {
+        chatId,
+        model: "gemini-3.8-flash-high",
+        mode: "agent",
+        workspace: "/Users/belief/dev/projects/review-router",
+        ready: true,
+    });
+    const switched = prepareAgentInvocation({
+        headers: { "x-codex-thread-id": thread },
+        body: { model: "cursor-grok-4.6-xhigh" },
+        messages: [{ role: "user", content: "switch to grok and keep going on the overlay mapping" }],
+        fullPrompt: "User: switch to grok and keep going on the overlay mapping",
+        model: "cursor-grok-4.6-xhigh",
+        mode: "agent",
+        workspaceDir: "/Users/belief/dev/projects/review-router",
+    }, { silent: true });
+    if (!switched.resumed || switched.resumeChatId !== chatId)
+        throw new Error(`model switch must --resume ${chatId}, got resumed=${switched.resumed} chat=${switched.resumeChatId}`);
+    if (switched.agentPrompt !== "switch to grok and keep going on the overlay mapping")
+        throw new Error("model switch must send last-user only, not a 3MB seed");
+    const otherWs = prepareAgentInvocation({
+        headers: { "x-codex-thread-id": thread },
+        body: { model: "cursor-grok-4.6-xhigh" },
+        messages: [{ role: "user", content: "now in another folder" }],
+        fullPrompt: "User: now in another folder",
+        model: "cursor-grok-4.6-xhigh",
+        mode: "agent",
+        workspaceDir: "/tmp/other-workspace",
+    }, { silent: true });
+    if (otherWs.resumed)
+        throw new Error("different workspace must still seed a new Cursor chat");
+    console.log("ok Desktop model switch resumes the same Cursor chat");
+}
+
+{
+    process.env.CURSOR_BRIDGE_THREAD_SESSIONS = `/tmp/cdc-sessions-remount-${process.pid}.json`;
+    resetStoreForTest();
+    putThreadSession("thread:01a0719d-424f-7801-8acf-be9add1e0114", {
+        chatId: "366794b3-33bc-47b9-a701-334dd6a10c6a",
+        model: "cursor-grok-4.6-xhigh",
+        mode: "agent",
+        workspace: "/Users/belief/dev/projects/review-router",
+        ready: true,
+    });
+    const { writeFileSync } = await import("node:fs");
+    const path = process.env.CURSOR_BRIDGE_THREAD_SESSIONS;
+    const store = JSON.parse((await import("node:fs")).readFileSync(path, "utf8"));
+    store["thread:01a0719d-424f-7801-8acf-be9add1e0114"].chatId = "9bed9a12-8ac5-4a4b-82ed-9ec9aba1baf9";
+    writeFileSync(path, `${JSON.stringify(store, null, 2)}\n`);
+    const remounted = getThreadSession("thread:01a0719d-424f-7801-8acf-be9add1e0114");
+    if (remounted.chatId !== "9bed9a12-8ac5-4a4b-82ed-9ec9aba1baf9")
+        throw new Error(`external remount must reload from disk, got ${remounted.chatId}`);
+    console.log("ok thread-session remount from disk");
+}
+
+{
+    process.env.CURSOR_BRIDGE_THREAD_SESSIONS = `/tmp/cdc-sessions-history-${process.pid}.json`;
+    process.env.CURSOR_BRIDGE_HISTORY_DIR = `/tmp/cdc-history-${process.pid}`;
+    resetStoreForTest();
+    const { toConversationHistory, splitHistoryAndLastUser, writeConversationHistoryFile } = await import("../patches/conversation-history.js");
+    const { buildAgentFixedArgs } = await import("../patches/agent-cmd-args.js");
+    const messages = [
+        { role: "user", content: "old long thread about ranking e2e" },
+        { role: "assistant", content: "we already shipped soak" },
+        { role: "user", content: "switch to cursor and keep the overlay mapping" },
+    ];
+    const last = "switch to cursor and keep the overlay mapping";
+    const { prior, prompt } = splitHistoryAndLastUser(messages, last);
+    if (prompt !== last || prior.length !== 2)
+        throw new Error(`split last-user, prior=${prior.length}`);
+    const hist = toConversationHistory(prior);
+    if (hist.messages[0].user.content[0].text.text !== "old long thread about ranking e2e")
+        throw new Error("history json must be ConversationHistory user text");
+    if (hist.messages[1].assistant.content[0].text.text !== "we already shipped soak")
+        throw new Error("history json must be ConversationHistory assistant text");
+    const file = writeConversationHistoryFile("thread:01a0719d-424f-7801-8acf-be9add1e0114", prior);
+    const seeded = prepareAgentInvocation({
+        headers: { "x-codex-thread-id": "01a0719d-424f-7801-8acf-be9add1e0114" },
+        body: { model: "cursor-grok-4.6-xhigh" },
+        messages,
+        fullPrompt: `User: old long thread about ranking e2e\n\nAssistant: we already shipped soak\n\nUser: ${last}`,
+        model: "cursor-grok-4.6-xhigh",
+        mode: "agent",
+        workspaceDir: "/Users/belief/dev/projects/review-router",
+    }, { silent: true });
+    if (seeded.resumed)
+        throw new Error("first Cursor turn of a Codex thread must seed, not resume");
+    if (seeded.agentPrompt !== last)
+        throw new Error(`seed prompt must be last user, not the 3MB dump, got ${seeded.agentPrompt.length} bytes`);
+    if (seeded.historyMessages.length !== 2)
+        throw new Error("seed must keep prior Desktop turns for --conversation-history-file");
+    const args = buildAgentFixedArgs({ force: true }, "/tmp", "auto", true, "agent", false, undefined, file);
+    if (!args.includes("--conversation-history-file") || !args.includes(file))
+        throw new Error("seed must pass cursor-agent --conversation-history-file");
+    const resumedArgs = buildAgentFixedArgs({ force: true }, "/tmp", "auto", true, "agent", false, "9bed9a12-8ac5-4a4b-82ed-9ec9aba1baf9", file);
+    if (resumedArgs.includes("--conversation-history-file"))
+        throw new Error("resume must not re-import history; Cursor chat already has it");
+    console.log("ok Codex transcript seeds via --conversation-history-file");
 }
 
 {
@@ -633,6 +957,17 @@ function collectWrite(res) {
     if (!events.some((e) => e.type === "done"))
         throw new Error("parser must finish on result success");
     console.log("ok stream-json thinking then tools then one assistant");
+}
+
+{
+    const { loadOverlayMapping } = await import("../patches/overlay-reload.js");
+    const first = await loadOverlayMapping();
+    if (typeof first.native.createResponsesNativeStream !== "function")
+        throw new Error("mapping reload must expose createResponsesNativeStream");
+    const second = await loadOverlayMapping();
+    if (first.native !== second.native)
+        throw new Error("unchanged overlay files must reuse the mapping module");
+    console.log("ok overlay mapping reload cache");
 }
 
 

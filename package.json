@@ -8,7 +8,8 @@
     "codex-desktop-cursor": "./scripts/cli.mjs"
   },
   "scripts": {
-    "test": "node test/sse-contract.test.mjs",
+    "test": "node test/sse-contract.test.mjs && node test/pipe.test.mjs && node test/model-switch-e2e.test.mjs",
+    "test:live": "node test/live-auto.test.mjs && node test/live-model-switch.test.mjs",
     "apply": "node scripts/apply.mjs",
     "desktop-version": "node scripts/desktop-version.mjs"
   },
